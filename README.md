@@ -43,9 +43,10 @@ backend service. The bar widget shows live data within ~2 seconds.
 - `notify-send` for notifications (optional; already part of Omarchy)
 
 `backend/bin/starlinkd` is a committed static Go binary (no runtime
-dependencies, built from this exact commit with `CGO_ENABLED=0 -trimpath
--ldflags="-s -w"`; verify with `go version -m backend/bin/starlinkd`). To
-rebuild it yourself: `backend/build.sh` needs `go` (≥ 1.27, matching backend/go.mod)
+dependencies, deterministically built with `CGO_ENABLED=0 -trimpath
+-buildvcs=false` and version-stamped to the release tag — verify with
+`go version -m backend/bin/starlinkd` and `backend/bin/starlinkd -version`).
+To rebuild it yourself at tag `v1.0.0`: `backend/build.sh` needs `go` (≥ 1.27, matching backend/go.mod)
 and `protoc`; the protobuf descriptors are captured from the dish itself via
 gRPC reflection (`backend/proto/dish.pb`) — nothing hand-maintained.
 

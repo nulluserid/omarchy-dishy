@@ -43,5 +43,8 @@ mkdir -p "$GEN"
 mv "$OUT/starlinkd/$GEN"/* "$GEN"/
 
 $GO mod tidy
-CGO_ENABLED=0 $GO build -trimpath -ldflags="-s -w" -o bin/starlinkd .
-echo "built bin/starlinkd"
+# Deterministic: CGO off (fully static), no VCS stamping (amend-proof);
+# version comes from the tag via -X main.version.
+VERSION="${VERSION:-$(git describe --tags --always 2>/dev/null || echo dev)}"
+CGO_ENABLED=0 $GO build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=$VERSION" -o bin/starlinkd .
+echo "built bin/starlinkd ($VERSION)"

@@ -18,6 +18,9 @@ import (
 
 var osStderr = os.Stderr
 
+// version is stamped at build time (-ldflags -X main.version=...).
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
@@ -35,8 +38,13 @@ func run(args []string) int {
 	mapInterval := fs.Duration("map-interval", 60*time.Second, "obstruction map refresh interval")
 	once := fs.Bool("once", false, "run a single tick, write files, print status.json, exit")
 	verbose := fs.Bool("v", false, "log transitions and errors to stderr")
+	showVersion := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	if *showVersion {
+		fmt.Println("starlinkd " + version)
+		return 0
 	}
 
 	dir, err := stateDir()
