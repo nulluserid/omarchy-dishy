@@ -1,0 +1,6 @@
+backend/gen/
+backend/status.json
+backend/hist.json
+backend/daily.json
+backend/events.jsonl
+backend/events.old.jsonl

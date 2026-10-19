@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.nulluserid.dishy",
+  "name": "Dishy",
+  "version": "1.0.0",
+  "author": "legend",
+  "description": "Starlink dish status in the bar with a live dashboard popup",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Dishy",
+    "description": "Starlink dish status in the bar with a live dashboard popup",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "show": "latency",
+      "interval": 1000
+    },
+    "schema": [
+      {
+        "key": "show",
+        "type": "enum",
+        "label": "Bar readout",
+        "options": [
+          "latency",
+          "down",
+          "icon"
+        ],
+        "defaultValue": "latency"
+      },
+      {
+        "key": "interval",
+        "type": "integer",
+        "label": "Refresh interval (ms)",
+        "min": 500,
+        "max": 10000,
+        "step": 500,
+        "defaultValue": 1000
+      }
+    ]
+  }
+}

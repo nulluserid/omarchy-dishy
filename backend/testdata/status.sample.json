@@ -1,0 +1,60 @@
+{
+ "ts": 1760000000,
+ "ok": true,
+ "error": "",
+ "dish": {
+  "id": "ut01-00000000-00000000",
+  "hw": "mini1_panda_prod1",
+  "sw": "2026.09.08.mr86422",
+  "bootCount": 363,
+  "uptimeS": 3310,
+  "ethMbps": 1000
+ },
+ "state": "ONLINE",
+ "stateDetail": "SOFTWARE_UPDATE_REBOOT_PENDING",
+ "live": {
+  "latencyMs": 26.5,
+  "downMbps": 0.94,
+  "upMbps": 0.09,
+  "powerW": 13.6
+ },
+ "lat5m": {
+  "p50": 21.7,
+  "p95": 27.8,
+  "mean": 21.7
+ },
+ "drop15m": {
+  "ratio": 0.0007,
+  "totalOutageS": 113,
+  "count15m": 1
+ },
+ "usage": {
+  "downGB": 12.34,
+  "upGB": 0.56,
+  "allTimeDownGB": 872.4,
+  "allTimeUpGB": 44.0
+ },
+ "avail": {
+  "todayPct": 99.98,
+  "sessionPct": 100.0
+ },
+ "obs": {
+  "fraction": 0.00213,
+  "timeObstructedS": 12,
+  "validS": 3177
+ },
+ "alerts": [
+  {
+   "id": "install_pending",
+   "label": "Install pending"
+  }
+ ],
+ "update": {
+  "state": "REBOOT_REQUIRED",
+  "progressPct": 1.0
+ },
+ "gps": {
+  "valid": true,
+  "sats": 22
+ }
+}
