@@ -132,8 +132,10 @@ state_change. `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
 Outage = ≥2 consecutive failed ticks or dish-reported outage beginning.
 Notifications are warm-gated: a daemon that starts while the dish is already
 unreachable stays quiet until it has seen ONLINE once — and (v2) they fire
-only while `link.onStarlink` is true, so travel days do not produce false
-"Starlink offline" pings. notify-send app-name: "Dishy".
+only on CONFIRMED Starlink evidence (`link.reason` ∈ `dish`|`lan`|`egress`),
+so a grace hold or an evidence-free network (travel, captive portal before
+login) never produces false "Starlink offline" pings. notify-send app-name:
+"Dishy".
 
 ## CLI controls (dial-on-demand, then exit)
 

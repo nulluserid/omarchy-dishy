@@ -13,8 +13,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	api "starlinkd/gen/spacex_api/device/device"
 	common "starlinkd/gen/spacex_api/device/common"
+	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
 
@@ -119,7 +119,7 @@ func TestGoodTickActiveWritesHist(t *testing.T) {
 	}
 	hf := readJSON(t, dir, "hist.json")
 	if hf["map"] == nil {
-		t.Fatal("active tick did not refresh the oblastmap into hist")
+		t.Fatal("active tick did not refresh the obstruction map into hist")
 	}
 }
 
@@ -197,7 +197,7 @@ func TestUpdateLinkGraceExpiry(t *testing.T) {
 	if d.lastPositive != anchor {
 		t.Fatal("anchor moved during expiry")
 	}
-	if d.link.Since != t0.Unix() + 580 {
+	if d.link.Since != t0.Unix()+580 {
 		t.Fatalf("Since = %d, want the flip at t0+580", d.link.Since)
 	}
 }
@@ -264,7 +264,7 @@ func TestAnnounceWindowCap(t *testing.T) {
 	d.cfg.dir = dir
 	d.warm = true
 	// Returning from a long stretch away (2 h ingest gap): an outage that
-	// started (and probably ended) an hour ago must water whenmark only,
+	// started (and probably ended) an hour ago must watermark only,
 	// while one that truly just started still announces.
 	old := []*dish.DishOutage{{
 		Cause:            dish.DishOutage_BOOTING,
@@ -426,7 +426,8 @@ func TestPostTickProbeOneShot(t *testing.T) {
 	}
 }
 
-func TestOnLinkChangeClosesOutageSilently(t *testing.T) {	dir := t.TempDir()
+func TestOnLinkChangeClosesOutageSilently(t *testing.T) {
+	dir := t.TempDir()
 	sent := 0
 	realSend := notifySend
 	notifySend = func(string, string) error { sent++; return nil }

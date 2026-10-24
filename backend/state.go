@@ -115,7 +115,7 @@ type gpsStats struct {
 // onStarlink is false; consumers that predate this field never see it.
 type linkInfo struct {
 	OnStarlink bool   `json:"onStarlink"`
-	Reason     string `json:"reason"`     // dish|lan|egress|network-changed|egress-other|grace|unknown
+	Reason     string `json:"reason"`     // dish|lan|egress|egress-other|grace
 	Since      int64  `json:"since"`      // unix s of the last onStarlink flip
 	LastDishOK int64  `json:"lastDishOK"` // unix s of the last successful dish RPC
 }
@@ -229,9 +229,9 @@ type daemon struct {
 	lastOutages []outage  // dish-reported outages, last history
 	hasHist     bool
 
-	daily            dailyFile
-	sessionS         int64 // wall seconds since daemon start, link-gated
-	sessionOnlineS   int64
+	daily          dailyFile
+	sessionS       int64 // wall seconds since daemon start, link-gated
+	sessionOnlineS int64
 
 	prevState  string
 	prevAlerts map[string]bool
@@ -242,31 +242,31 @@ type daemon struct {
 	failed             int
 	maxDishOutageStart int64
 
-	mapData *obsMap
-	lastMap time.Time
+	mapData  *obsMap
+	lastMap  time.Time
 	lastHist time.Time // last successful history ingest (drives idle cadence)
 
 	// Link state (backend/link.go). Consumers: only the tick loop.
-	link        linkInfo // onStarlink/reason/since/lastDishOK, published in status.json
-	lastPositive int64   // unix s of the last on-starlink evidence
-	lastDishOK  bool     // outcome of the most recent GetStatus
-	geo         geoInfo  // last egress lookup; Ts=0 until the first call
-	geoFetching bool     // an egress lookup is in flight
-	geoBump     bool     // dashboard (re)opened: refresh geo if older than transition interval
-	geoCh       chan geoInfo
-	lastRoute    string // default-route fingerprint, "" = no default route
+	link           linkInfo // onStarlink/reason/since/lastDishOK, published in status.json
+	lastPositive   int64    // unix s of the last on-starlink evidence
+	lastDishOK     bool     // outcome of the most recent GetStatus
+	geo            geoInfo  // last egress lookup; Ts=0 until the first call
+	geoFetching    bool     // an egress lookup is in flight
+	geoBump        bool     // dashboard (re)opened: refresh geo if older than transition interval
+	geoCh          chan geoInfo
+	lastRoute      string // default-route fingerprint, "" = no default route
 	lastRouteKnown bool
-	routeChanged  bool // fingerprint changed since the last geo launch
-	probeUntil   time.Time // one-shot fast-poll burst end
-	panelUntil   time.Time // dashboard-open lease end
-	lastTickAt   time.Time // previous round's tick time, for elapsed dt
-	lastTickOK   bool
-	dishBase     net.IP // dish target /24
-	dishMask     net.IPMask
-	addrsFn      func() ([]net.Addr, error) // injectable for tests
-	ctrlLn       net.Listener // panel control socket (optional)
-	ctrlPath     string
-	ctrlCh       chan string
+	routeChanged   bool      // fingerprint changed since the last geo launch
+	probeUntil     time.Time // one-shot fast-poll burst end
+	panelUntil     time.Time // dashboard-open lease end
+	lastTickAt     time.Time // previous round's tick time, for elapsed dt
+	lastTickOK     bool
+	dishBase       net.IP // dish target /24
+	dishMask       net.IPMask
+	addrsFn        func() ([]net.Addr, error) // injectable for tests
+	ctrlLn         net.Listener               // panel control socket (optional)
+	ctrlPath       string
+	ctrlCh         chan string
 
 	lastStatus *dish.DishGetStatusResponse // last good status, for dish info on failures
 	lastObs    obsStats
