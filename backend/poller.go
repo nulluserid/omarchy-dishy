@@ -55,8 +55,18 @@ func (d *daemon) tick(active bool) {
 	d.updateRoute(now)
 	d.maybeFetchGeo(now, active)
 
-	dt := now.Sub(d.lastTickAt) // real elapsed: the cadence varies idle/active
+	// Real elapsed: the cadence varies idle/active. Booked at most
+	// maxBookedDt — timers freeze across suspend, and a laptop waking after
+	// hours must not enter those hours as dish downtime.
+	dt := now.Sub(d.lastTickAt)
 	d.lastTickAt = now
+	if dt > maxBookedDt || dt < 0 {
+		if dt > maxBookedDt {
+			dt = maxBookedDt
+		} else {
+			dt = 0
+		}
+	}
 
 	// History ingest runs every active tick and every idleHistInterval in the
 	// background (keeps dailies accurate and the ring current at 60s cost).
@@ -67,11 +77,13 @@ func (d *daemon) tick(active bool) {
 	cancel()
 	if err != nil {
 		d.failTick(now, rpcErr(err), dt, active)
+		d.postTick(now, false)
 		return
 	}
 	d.warn("") // success resets rate-limit key
 
 	d.goodTick(now, resp.GetDishGetStatus(), active, fetchHist, dt)
+	d.postTick(now, true)
 }
 
 // postTick books the one-shot probe: only the transition into failure starts
@@ -79,7 +91,6 @@ func (d *daemon) tick(active bool) {
 // at 2 s.
 func (d *daemon) postTick(now time.Time, ok bool) {
 	if !ok && d.lastTickOK {
-		now := now
 		d.probeUntil = now.Add(probeWindow)
 		d.vlog("failure probe: %s window", probeWindow)
 	}
@@ -170,17 +181,19 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 }
 
 // failTick handles a failed GetStatus: state OFFLINE, ok:false, fresh status.
+// Outage tracking and daily booking require CONFIRMED evidence of being on
+// Starlink (dish/lan/egress) — a grace hold or a no-evidence state books
+// nothing and notifies nothing (a parked or portal-walled machine is not
+// dish downtime).
 func (d *daemon) failTick(now time.Time, msg string, dt time.Duration, active bool) {
 	d.failed++
 	d.warn("status rpc: " + msg)
 	d.updateLink(now, false)
-	if d.link.OnStarlink {
+	if d.linkConfirmed() {
 		if d.failed >= 2 && d.openOutage == nil && d.warm {
 			// Contract: an outage is >=2 consecutive failed ticks. Warm-gated:
 			// a daemon that starts while the dish is already unreachable stays
-			// quiet (e.g. boot races), same as dish-reported outages. Gated on
-			// the link marker too: a machine parked away from the dish never
-			// raises a false outage (or notification).
+			// quiet (e.g. boot races), same as dish-reported outages.
 			d.openOutage = &outageTrack{cause: "OFFLINE", start: now.Unix()}
 			d.daily.Outages++
 			d.emit(event{Type: "outage_start", Cause: "OFFLINE"},
@@ -357,10 +370,15 @@ func toOutages(list []*dish.DishOutage) []outage {
 
 // observeDishOutages fires outage_start for an outage the dish reports as
 // just beginning. Historical entries only prime the watermark. The freshness
-// window derives from the ingest gap: a ring skimmed every 60 s still
-// announces windows that open during the gap.
+// window derives from the ingest gap (a ring skimmed every 60 s still
+// announces windows that open during the gap) but is capped: after hours
+// parked away, outages that started (and likely ended) long ago are recorded
+// silently instead of announced as new.
 func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time, gap time.Duration) {
 	window := int64(gap.Seconds()) + 2
+	if window > int64(maxOutageAnnounceWindow.Seconds()) {
+		window = int64(maxOutageAnnounceWindow.Seconds())
+	}
 	for _, o := range list {
 		start := o.GetStartTimestampNs() / 1e9
 		if start <= d.maxDishOutageStart {

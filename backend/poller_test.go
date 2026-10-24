@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -332,8 +333,10 @@ func TestFailTickNotifyWarmGate(t *testing.T) {
 	d := newDaemon(config{}, nil)
 	d.cfg.dir = t.TempDir() // failTick persists; keep writes out of CWD
 	d.startWall = t0.Add(-time.Hour)
-	// Warm on-network session: link confirms Starlink, then the dish RPC goes
-	// dark. This is the case a false travel-outage must be distinguished from.
+	// On the dish's LAN: this is the canonical at-home dark-dish case — LAN
+	// evidence keeps the link CONFIRMED while the RPC is down, so the outage
+	// machinery still runs. Synthetic addrs keep the test hermetic.
+	d.addrsFn = func() ([]net.Addr, error) { return []net.Addr{mkAddr("192.168.100.9/32")}, nil }
 	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: t0.Unix()}
 	d.lastPositive = t0.Unix()
 	for i := 0; i < 3; i++ {

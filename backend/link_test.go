@@ -166,25 +166,126 @@ func TestFailTickOffNetworkFreeze(t *testing.T) {
 
 func TestUpdateLinkGraceExpiry(t *testing.T) {
 	d := newDaemon(config{target: "192.168.100.1:9200"}, mkStub())
-	// On-network then the machine goes fully offline (no geo, no route
-	// evidence): stays visible through the grace window, then hides.
+	// On-network then the machine goes fully offline (no geo lookup, no LAN
+	// evidence): stays visible through the grace window, then hides. The walk
+	// uses the real idle cadence — a one-shot 11-minute jump would mask a
+	// grace tick renewing the anchor (the bug this pins: ONLY real evidence
+	// may renew d.lastPositive, never a grace hold).
 	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: t0.Unix() - 7200}
-	d.lastPositive = t0.Unix() - 600
+	d.lastPositive = t0.Unix() - 30 // last real evidence right before the walk
 
-	d.updateLink(t0, false)
-	if !d.link.OnStarlink || d.link.Reason != "grace" {
-		t.Fatalf("within grace: %+v, want onSTARLINK/grace", d.link)
+	for i := 1; i <= 57; i++ { // t0+10s .. t0+570s: still within 10 min
+		now := t0.Add(time.Duration(i) * 10 * time.Second)
+		d.updateLink(now, false)
+		if !d.link.OnStarlink || d.link.Reason != "grace" {
+			t.Fatalf("tick %d: %+v, want on-starlink grace hold", i, d.link)
+		}
+		if d.lastPositive != t0.Unix()-30 {
+			t.Fatalf("tick %d: grace renewed the anchor to %d", i, d.lastPositive)
+		}
 	}
-	if d.link.Since != t0.Unix()-7200 {
-		t.Fatalf("grace bump changed Since to %d", d.link.Since)
+	anchor := d.lastPositive
+	for i := 58; i <= 65; i++ { // crosses the 10-minute mark
+		d.updateLink(t0.Add(time.Duration(i)*10*time.Second), false)
 	}
-
-	d.updateLink(t0.Add(11*time.Minute), false)
 	if d.link.OnStarlink {
-		t.Fatal("grace expired but link stayed on")
+		t.Fatalf("grace expired but link stayed on: %+v", d.link)
 	}
 	if d.link.Reason != "grace" {
 		t.Fatalf("reason = %q, want grace", d.link.Reason)
+	}
+	if d.lastPositive != anchor {
+		t.Fatal("anchor moved during expiry")
+	}
+	if d.link.Since != t0.Unix() + 580 {
+		t.Fatalf("Since = %d, want the flip at t0+580", d.link.Since)
+	}
+}
+
+func TestGraceHoldNoOutageNotificationsOrBooking(t *testing.T) {
+	dir := t.TempDir()
+	sent := 0
+	realSend := notifySend
+	notifySend = func(string, string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	d := newDaemon(config{interval: 10 * time.Second, idleInterval: 10 * time.Second, idleHistInterval: 60 * time.Second, dir: dir}, mkStub())
+	d.cfg.dir = dir
+	d.warm = true
+	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: t0.Unix() - 7200}
+	d.lastPositive = t0.Unix() - 30
+
+	// 15+ minutes of failing ticks with no evidence anywhere (machine left,
+	// nothing classifies it): the grace hold must never notify, never open an
+	// outage, and — with confirmed-evidence booking — never book downtime.
+	for i := 0; i < 95; i++ {
+		d.failTick(t0.Add(time.Duration(i)*10*time.Second), "refused", 10*time.Second, false)
+	}
+	if sent != 0 {
+		t.Fatalf("grace hold produced %d outage notifications, want 0", sent)
+	}
+	if d.openOutage != nil {
+		t.Fatal("grace hold opened an outage track")
+	}
+	if d.daily.TotalS != 0 || d.sessionS != 0 || d.daily.Outages != 0 {
+		t.Fatalf("grace hold booked downtime: daily=%+v sessionS=%d", d.daily, d.sessionS)
+	}
+	if d.link.OnStarlink {
+		t.Fatal("15 min with no evidence never converged to hidden")
+	}
+}
+
+func TestSuspendClamp(t *testing.T) {
+	dir := t.TempDir()
+	d := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: 60 * time.Second, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: dir,
+	}, mkStub())
+	d.warm = true
+	d.geo.Ts = time.Now().Unix() // fresh: maybeFetchGeo must not fire a live lookup
+	// Simulate suspend: last tick 8 h ago. The booked dt must be capped so
+	// the whole sleep never lands in daily/session counters.
+	d.lastTickAt = time.Now().Add(-8 * time.Hour)
+	d.tick(false)
+	if d.daily.TotalS != 30 || d.sessionS != 30 {
+		t.Fatalf("suspend booked TotalS=%d sessionS=%d, want 30/30 (capped)", d.daily.TotalS, d.sessionS)
+	}
+}
+
+func TestAnnounceWindowCap(t *testing.T) {
+	dir := t.TempDir()
+	sent := 0
+	realSend := notifySend
+	notifySend = func(string, string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	d := newDaemon(config{dir: dir}, mkStub())
+	d.cfg.dir = dir
+	d.warm = true
+	// Returning from a long stretch away (2 h ingest gap): an outage that
+	// started (and probably ended) an hour ago must water whenmark only,
+	// while one that truly just started still announces.
+	old := []*dish.DishOutage{{
+		Cause:            dish.DishOutage_BOOTING,
+		StartTimestampNs: (t0.Unix() - 3600) * 1e9,
+		DurationNs:       60 * 1e9,
+	}}
+	d.observeDishOutages(old, t0, 2*time.Hour)
+	if sent != 0 || d.openOutage != nil {
+		t.Fatalf("stale outage announced on resume: sent=%d track=%v", sent, d.openOutage)
+	}
+	if d.maxDishOutageStart != t0.Unix()-3600 {
+		t.Fatalf("watermark not advanced: %d", d.maxDishOutageStart)
+	}
+	recent := []*dish.DishOutage{{
+		Cause:            dish.DishOutage_BOOTING,
+		StartTimestampNs: (t0.Unix() - 30) * 1e9,
+		DurationNs:       20 * 1e9,
+	}}
+	d.observeDishOutages(recent, t0.Add(time.Second), 2*time.Hour)
+	if sent != 1 || d.openOutage == nil {
+		t.Fatalf("recent outage not announced: sent=%d track=%v", sent, d.openOutage)
 	}
 }
 

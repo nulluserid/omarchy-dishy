@@ -19,6 +19,15 @@ const (
 	probeWindow     = 30 * time.Second // fast-poll burst after a failure or route change
 	panelLease      = 90 * time.Second // dashboard-open lease; QML heartbeats every 60s
 	starlinkASN     = "AS14593"
+
+	// Single-tick booking cap: timers freeze across suspend/resume, and the
+	// first tick after waking carries a huge dt — book at most this (2 idle
+	// ticks + tick time), never the sleep.
+	maxBookedDt = 30 * time.Second
+	// Freshness cap for dish-reported outage announcements: announce starts
+	// at most this old (covers the 60 s idle-skim gap plus slack); older
+	// entries only advance the watermark.
+	maxOutageAnnounceWindow = 122 * time.Second
 )
 
 // Array index order inside daemon.arrays.
@@ -254,6 +263,7 @@ type daemon struct {
 	lastTickOK   bool
 	dishBase     net.IP // dish target /24
 	dishMask     net.IPMask
+	addrsFn      func() ([]net.Addr, error) // injectable for tests
 	ctrlLn       net.Listener // panel control socket (optional)
 	ctrlPath     string
 	ctrlCh       chan string
@@ -273,6 +283,7 @@ func newDaemon(cfg config, client api.DeviceClient) *daemon {
 		lastTickAt: time.Now(),
 		geoCh:      make(chan geoInfo, 1),
 		ctrlCh:     make(chan string, 4),
+		addrsFn:    net.InterfaceAddrs,
 	}
 	d.dishBase, d.dishMask = dishSubnet(cfg.target)
 	d.resetArrays()

@@ -60,7 +60,7 @@ func (d *daemon) updateRoute(now time.Time) {
 // localAddrInDishSubnet reports whether any local IPv4 address shares the
 // dish target's /24.
 func (d *daemon) localAddrInDishSubnet() bool {
-	addrs, err := net.InterfaceAddrs()
+	addrs, err := d.addrsFn()
 	if err != nil {
 		return false
 	}
@@ -86,7 +86,10 @@ func addrInSubnet(addrs []net.Addr, base net.IP, mask net.IPMask) bool {
 }
 
 // updateLink recomputes link.onStarlink from the current evidence and applies
-// the grace window when nothing positive is known. Runs on the tick loop.
+// the grace window when nothing positive is known. The grace anchor
+// (d.lastPositive) is renewed only by real evidence — a quiet network
+// (captive portal before login, Wi-Fi drop) converges to hidden in exactly
+// linkGraceWindow. Runs on the tick loop.
 func (d *daemon) updateLink(now time.Time, dishOK bool) {
 	lastDish := d.link.LastDishOK
 	if dishOK {
@@ -97,27 +100,29 @@ func (d *daemon) updateLink(now time.Time, dishOK bool) {
 	was := d.link.OnStarlink
 	var on bool
 	var reason string
+	positive := false // current tick produced actual on-starlink evidence
 	switch {
 	case dishOK:
-		on, reason = true, "dish"
+		on, reason, positive = true, "dish", true
 	case d.localAddrInDishSubnet():
-		on, reason = true, "lan"
+		on, reason, positive = true, "lan", true
 	case geoEvidence(d.geo, now):
 		if d.geo.IsStarlink {
-			on, reason = true, "egress"
+			on, reason, positive = true, "egress", true
 		} else {
 			on, reason = false, "egress-other"
 		}
 	default:
-		// No evidence: keep the current belief through the grace window, then
-		// flip off. An unlucky start (boot before network) is already off.
+		// No evidence right now: keep the current belief through the grace
+		// window, then flip off. An unlucky start (boot before network) is
+		// already off.
 		if now.Unix()-d.lastPositive <= int64(linkGraceWindow.Seconds()) && d.link.Since > 0 {
 			on, reason = d.link.OnStarlink, "grace"
 		} else {
 			on, reason = false, "grace"
 		}
 	}
-	if on {
+	if positive {
 		d.lastPositive = now.Unix()
 	}
 
@@ -132,6 +137,18 @@ func (d *daemon) updateLink(now time.Time, dishOK bool) {
 	if on != was {
 		d.onLinkChange(now, on)
 	}
+}
+
+// linkConfirmed answers whether the CURRENT evidence positively says
+// Starlink — not a held grace belief. Outage tracking and daily booking gate
+// on this (CONTRACT.md "Notifications": suppressed during grace), so a
+// network with no evidence at all never books "Starlink offline" time.
+func (d *daemon) linkConfirmed() bool {
+	switch d.link.Reason {
+	case "dish", "lan", "egress":
+		return true
+	}
+	return false
 }
 
 // onLinkChange reacts to an onStarlink flip.

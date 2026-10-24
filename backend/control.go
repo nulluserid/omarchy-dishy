@@ -82,7 +82,15 @@ func (d *daemon) startControl() error {
 	if len(path) >= 104 {
 		return fmt.Errorf("control socket: path too long (%d)", len(path))
 	}
-	os.Remove(path) // stale socket from a previous run; systemd unit prevents doubles
+	// Never steal a live daemon's socket: if something is already answering
+	// there, let it keep the panel channel (manual double-starts happen).
+	if fi, err := os.Stat(path); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		if c, derr := net.DialTimeout("unix", path, 300*time.Millisecond); derr == nil {
+			c.Close()
+			return errors.New("control socket: another daemon is listening")
+		}
+	}
+	os.Remove(path) // stale socket from a previous run
 	ln, err := net.Listen("unix", path)
 	if err != nil {
 		return err

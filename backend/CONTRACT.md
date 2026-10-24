@@ -52,17 +52,19 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
   "Off-network accounting"). `reason` ∈ `dish` (GetStatus answered) | `lan`
   (local address inside the target's /24) | `egress` (Starlink carrier on the
   exit path) | `egress-other` (fresh geo with a non-Starlink carrier) | `grace`
-  (no evidence: keep last belief 10 min) | `network-changed` | `unknown`.
-  `since` = unix s of the last `onStarlink` flip; `lastDishOK` = unix s of the
-  last successful GetStatus. Missing `link` block (v1 daemon): consumers must
-  default to visible.
+  (no evidence at all: hold the last belief for 10 min from the last evidence,
+  then hide; outage notifications and downtime booking require a confirmed
+  reason, never the grace hold). `since` = unix s of the last `onStarlink`
+  flip; `lastDishOK` = unix s of the last successful GetStatus. Missing
+  `link` block (v1 daemon): consumers must default to visible.
 - `geo` (v2, omitted until the first lookup): egress info from
   `https://ifconfig.co/json` — public IP, approximate exit city/region/country,
   carrier (`asn`, `asn_org`), and `isStarlink` (AS14593 or SpaceX/Starlink org
-  string). Refresh: 5 min settled on-network, 1 min while classifying (dish
-  unreachable or default route flipped) and after a dashboard open when older
-  than 60 s. No API key; the provider asks ≈1 request/min — the 1-min floor in
-  the daemon is the courtesy limit. Lookups run off the tick path.
+  string). Refresh: 5 min settled on-network (with the dashboard open, forced
+  on open + every heartbeat whenever the answer is over 60 s old — so at most
+  ≈1/min, the provider's courtesy limit), 1 min while classifying (dish
+  unreachable or default route flipped). No API key. Lookups run off the tick
+  path.
 
 ## hist.json — 25KB, written ONLY on active (dashboard-open) ticks; the
 background cadence keeps the ring in memory and refreshes it every 60 s (also
@@ -96,11 +98,14 @@ On date change: roll counters into `allTime`, zero today's.
 
 ### Off-network accounting (v2)
 
-Counters advance only while `link.onStarlink` is true, using real elapsed
-seconds per tick (the cadence varies). Failure ticks off-network add no time,
-open no outages, send no notifications; a link flip off-network closes any
-open outage with a silent `outage_end` event (cause "(left network)"). A
-machine parked on another network does not pollute the dish's availability.
+Counters advance only on confirmed Starlink evidence (`link.reason` ∈
+`dish`|`lan`|`egress`; the grace hold counts nothing), using real elapsed
+seconds per tick — capped at 30 s per tick, so suspend/resume hours are not
+booked as dish downtime (timers freeze across sleep; the first tick after
+waking books one capped tick). Failure ticks off-network add no time, open no
+outages, send no notifications; a link flip off-network closes any open
+outage with a silent `outage_end` event (cause "(left network)"). A machine
+parked on another network does not pollute the dish's availability.
 
 ## events.jsonl — append on transitions; rotate >512KB → events.old.jsonl
 
