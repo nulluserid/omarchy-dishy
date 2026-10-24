@@ -7,8 +7,8 @@
 //
 // Evidence, strongest first:
 //
-//	dish         — the dish answers GetStatus (its exact RPC target)
-//	lan          — a local IPv4 address sits inside the dish target's /24
+//	dish         — the dish's exact RPC target answers GetStatus AS a Starlink
+//	               dish (response carries dish device info)
 //	egress       — the egress IP's ASN/org resolves to Starlink
 //	egress-other — fresh geo with a non-Starlink carrier: positively elsewhere
 //	grace        — no evidence at all; keep showing for linkGraceWindow
@@ -38,8 +38,9 @@ import (
 const geoEndpoint = "https://ifconfig.co/json"
 
 // updateRoute refreshes the default-route fingerprint. A change starts the
-// one-shot probe burst and demands a fresh egress lookup: the machine may
-// have just left (or joined) the Starlink network.
+// one-shot probe burst, demands a fresh egress lookup, and anchors
+// lastRouteChangedUnix — the gate boundary for egress-confirmed outages (a
+// geo answer older than the route change describes the route we left).
 func (d *daemon) updateRoute(now time.Time) {
 	fp, ok := defaultRouteFingerprint()
 	if !ok {
@@ -53,36 +54,9 @@ func (d *daemon) updateRoute(now time.Time) {
 	if changed {
 		d.vlog("default route: %s", fp)
 		d.routeChanged = true
+		d.lastRouteChangedUnix = now.Unix()
 		d.probeUntil = now.Add(probeWindow)
 	}
-}
-
-// localAddrInDishSubnet reports whether any local IPv4 address shares the
-// dish target's /24.
-func (d *daemon) localAddrInDishSubnet() bool {
-	addrs, err := d.addrsFn()
-	if err != nil {
-		return false
-	}
-	return addrInSubnet(addrs, d.dishBase, d.dishMask)
-}
-
-// addrInSubnet is the pure subnet check (testable without live interfaces).
-func addrInSubnet(addrs []net.Addr, base net.IP, mask net.IPMask) bool {
-	for _, a := range addrs {
-		ipn, ok := a.(*net.IPNet)
-		if !ok {
-			continue
-		}
-		ip := ipn.IP.To4()
-		if ip == nil {
-			continue
-		}
-		if ip.Mask(mask).Equal(base) {
-			return true
-		}
-	}
-	return false
 }
 
 // updateLink recomputes link.onStarlink from the current evidence and applies
@@ -90,11 +64,18 @@ func addrInSubnet(addrs []net.Addr, base net.IP, mask net.IPMask) bool {
 // (d.lastPositive) is renewed only by real evidence — a quiet network
 // (captive portal before login, Wi-Fi drop) converges to hidden in exactly
 // linkGraceWindow. Runs on the tick loop.
+//
+// dishOK carries the standing dish belief: a fresh RPC result on the tick
+// paths, or the belief being carried over by applyGeo so a good state keeps
+// reason "dish". It NEVER advances link.lastDishOK — a geo application is no
+// fresh answer; goodTick stamps the field after this call.
+//
+// There is deliberately NO LAN-subnet signal: the dish LAN's local range
+// varies by setup (router mode uses 192.168.5.x or 10.0.0.x; all of them
+// route the target address to the dish), and unrelated devices live on
+// 192.168.100.x too. The two real signals are the dish's gRPC target
+// answering AS a Starlink dish, and the egress carrier.
 func (d *daemon) updateLink(now time.Time, dishOK bool) {
-	lastDish := d.link.LastDishOK
-	if dishOK {
-		lastDish = now.Unix()
-	}
 	d.lastDishOK = dishOK
 
 	was := d.link.OnStarlink
@@ -104,8 +85,6 @@ func (d *daemon) updateLink(now time.Time, dishOK bool) {
 	switch {
 	case dishOK:
 		on, reason, positive = true, "dish", true
-	case d.localAddrInDishSubnet():
-		on, reason, positive = true, "lan", true
 	case geoEvidence(d.geo, now):
 		if d.geo.IsStarlink {
 			on, reason, positive = true, "egress", true
@@ -128,7 +107,6 @@ func (d *daemon) updateLink(now time.Time, dishOK bool) {
 
 	nl := d.link
 	nl.Reason = reason
-	nl.LastDishOK = lastDish
 	if on != was {
 		nl.OnStarlink = on
 		nl.Since = now.Unix()
@@ -145,7 +123,7 @@ func (d *daemon) updateLink(now time.Time, dishOK bool) {
 // network with no evidence at all never books "Starlink offline" time.
 func (d *daemon) linkConfirmed() bool {
 	switch d.link.Reason {
-	case "dish", "lan", "egress":
+	case "dish", "egress":
 		return true
 	}
 	return false
@@ -207,8 +185,9 @@ func (d *daemon) maybeFetchGeo(now time.Time, active bool) {
 
 func (d *daemon) startGeoFetch() {
 	d.geoFetching = true
+	at := time.Now() // answer describes the network as of the request launch
 	go func() {
-		g, err := fetchGeo()
+		g, err := fetchGeo(at)
 		if err != nil {
 			d.vlog("geo: %v", err)
 		}
@@ -242,8 +221,10 @@ func (d *daemon) applyGeo(g geoInfo) {
 }
 
 // fetchGeo performs one egress lookup. A failed call returns a zero geoInfo —
-// applyGeo keeps the previous result.
-func fetchGeo() (geoInfo, error) {
+// applyGeo keeps the previous result. Timestamped at `at` (the request
+// launch), so a lookup in flight during a route change can never masquerade
+// as a post-change answer.
+func fetchGeo(at time.Time) (geoInfo, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequest(http.MethodGet, geoEndpoint, nil)
 	if err != nil {
@@ -270,7 +251,7 @@ func fetchGeo() (geoInfo, error) {
 		return geoInfo{}, err
 	}
 	return geoInfo{
-		Ts:         time.Now().Unix(),
+		Ts:         at.Unix(),
 		IP:         raw.IP,
 		City:       raw.City,
 		Region:     raw.RegionName,

@@ -49,8 +49,10 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
 - `link` (v2): off-network UI marker. `onStarlink:false` ⇒ the machine is
   provably elsewhere: the QML bar widget hides (ModuleSlot → 0 width, layout
   position preserved), the panel closes, and daily counters freeze (see
-  "Off-network accounting"). `reason` ∈ `dish` (GetStatus answered) | `lan`
-  (local address inside the target's /24) | `egress` (Starlink carrier on the
+  "Off-network accounting"). `reason` ∈ `dish` (GetStatus answered back as a
+  Starlink dish — the response carries dish device info; a cable modem or
+  router holding the target address that answers without it does not count) |
+  `egress` (Starlink carrier on the
   exit path) | `egress-other` (fresh geo with a non-Starlink carrier) | `grace`
   (no evidence at all: hold the last belief for 10 min from the last evidence,
   then hide; outage notifications and downtime booking require a confirmed
@@ -63,8 +65,11 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
   string). Refresh: 5 min settled on-network (with the dashboard open, forced
   on open + every heartbeat whenever the answer is over 60 s old — so at most
   ≈1/min, the provider's courtesy limit), 1 min while classifying (dish
-  unreachable or default route flipped). No API key. Lookups run off the tick
-  path.
+  unreachable or default route flipped; once a post-flip lookup is consumed,
+  follow-ups return to the settled 5-min clock). No API key. Lookups run off
+  the tick path, and results are stamped when the request is launched — the
+  answer describes the network as of then, so a lookup in flight during a
+  route change can never pass for a post-change answer.
 
 ## hist.json — 25KB, written ONLY on active (dashboard-open) ticks; the
 background cadence keeps the ring in memory and refreshes it every 60 s (also
@@ -99,7 +104,7 @@ On date change: roll counters into `allTime`, zero today's.
 ### Off-network accounting (v2)
 
 Counters advance only on confirmed Starlink evidence (`link.reason` ∈
-`dish`|`lan`|`egress`; the grace hold counts nothing), using real elapsed
+`dish`|`egress`; the grace hold counts nothing), using real elapsed
 seconds per tick — capped at 30 s per tick, so suspend/resume hours are not
 booked as dish downtime (timers freeze across sleep; the first tick after
 waking books one capped tick). Failure ticks off-network add no time, open no
@@ -132,10 +137,15 @@ state_change. `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
 Outage = ≥2 consecutive failed ticks or dish-reported outage beginning.
 Notifications are warm-gated: a daemon that starts while the dish is already
 unreachable stays quiet until it has seen ONLINE once — and (v2) they fire
-only on CONFIRMED Starlink evidence (`link.reason` ∈ `dish`|`lan`|`egress`),
-so a grace hold or an evidence-free network (travel, captive portal before
-login) never produces false "Starlink offline" pings. notify-send app-name:
-"Dishy".
+only on CONFIRMED Starlink evidence (`link.reason` ∈ `dish`|`egress`), so a
+grace hold or an evidence-free network (travel, captive portal before login)
+never produces false "Starlink offline" pings. Egress-confirmed outages carry
+one further gate: the geo answer must postdate the last default-route change
+— a stale home answer describes the route the machine left, not the dish
+failing on the route it is on. The gate arms either on a post-change geo
+answer (lookups succeed) or on an identity-verified dish answer since the
+change (`link.lastDishOK`), so a real at-home outage behind a transient
+route change still notifies. notify-send app-name: "Dishy".
 
 ## CLI controls (dial-on-demand, then exit)
 

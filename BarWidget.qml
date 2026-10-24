@@ -19,8 +19,8 @@ BarWidget {
   property var statusData: null
   property bool stale: true
 
-  // Auto-hide while away from Starlink (the local network claimed the dish's
-  // exact gRPC target, the LAN subnet, or its egress carrier). The daemon
+  // Auto-hide while away from Starlink (the dish's gRPC target stopped
+  // answering as a Starlink dish, or its egress carrier changed). The daemon
   // keeps checking at its own cadence and the widget returns by itself;
   // `visible: false` collapses the ModuleSlot to zero width, keeping layout
   // position. Setting: autoHide on/off.

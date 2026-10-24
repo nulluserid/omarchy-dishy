@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,12 +53,6 @@ func onlineStatus() *dish.DishGetStatusResponse {
 
 func mkStub() *stubClient {
 	return &stubClient{status: onlineStatus(), history: mkHist(5, []float32{20}, []float32{0})}
-}
-
-// mkAddr builds one synthetic interface address (for subnet evidence tests).
-func mkAddr(base string) net.Addr {
-	_, ipn, _ := net.ParseCIDR(base)
-	return ipn
 }
 
 func readJSON(t *testing.T, dir, name string) map[string]any {
@@ -166,8 +159,8 @@ func TestFailTickOffNetworkFreeze(t *testing.T) {
 
 func TestUpdateLinkGraceExpiry(t *testing.T) {
 	d := newDaemon(config{target: "192.168.100.1:9200"}, mkStub())
-	// On-network then the machine goes fully offline (no geo lookup, no LAN
-	// evidence): stays visible through the grace window, then hides. The walk
+	// On-network then the machine goes fully offline (no geo lookup, no dish
+	// answer): stays visible through the grace window, then hides. The walk
 	// uses the real idle cadence — a one-shot 11-minute jump would mask a
 	// grace tick renewing the anchor (the bug this pins: ONLY real evidence
 	// may renew d.lastPositive, never a grace hold).
@@ -318,21 +311,30 @@ func TestUpdateLinkEgressEvidence(t *testing.T) {
 	}
 }
 
-func TestSubnetEvidence(t *testing.T) {
-	if !addrInSubnet([]net.Addr{mkAddr("192.168.100.7/32")}, net.ParseIP("192.168.100.0"), net.CIDRMask(24, 32)) {
-		t.Fatal("192.168.100.7 should match the dish /24")
+func TestApplyGeoDoesNotStampDish(t *testing.T) {
+	// applyGeo recomputes the geo dimension only: a good standing belief
+	// keeps reason "dish" without claiming a fresh RPC (the outage gate
+	// treats link.lastDishOK as "identity-verified answer", so nothing but
+	// goodTick may advance it). Without the belief, geo alone reclassifies.
+	d := newDaemon(config{}, mkStub())
+	now := time.Now()
+	d.warm = true
+	d.lastDishOK = true
+	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: now.Unix() - 3600, LastDishOK: now.Unix() - 30}
+	d.geo = geoInfo{Ts: now.Unix() - 3600} // old: forces a fresh result through
+
+	d.applyGeo(geoInfo{Ts: now.Unix(), IsStarlink: false, ASN: "AS11404", Org: "Qwest"})
+	if d.link.Reason != "dish" {
+		t.Fatalf("good belief overruled by geo: reason=%q", d.link.Reason)
 	}
-	if addrInSubnet([]net.Addr{mkAddr("10.5.5.60/32")}, net.ParseIP("192.168.100.0"), net.CIDRMask(24, 32)) {
-		t.Fatal("10.5.5.60 must not match the dish /24")
+	if d.link.LastDishOK != now.Unix()-30 {
+		t.Fatalf("applyGeo advanced lastDishOK to %d, want untouched %d", d.link.LastDishOK, now.Unix()-30)
 	}
-	// Dish target parsing: /24 base around the configured host.
-	base, mask := dishSubnet("192.168.100.1:9200")
-	if !base.Equal(net.ParseIP("192.168.100.0")) || mask.String() != net.CIDRMask(24, 32).String() {
-		t.Fatalf("dishSubnet = %v %v", base, mask)
-	}
-	base, _ = dishSubnet("not-a-host:9200")
-	if !base.Equal(net.ParseIP("192.168.100.0")) {
-		t.Fatalf("dishSubnet fallback = %v", base)
+
+	d.lastDishOK = false
+	d.applyGeo(geoInfo{Ts: now.Unix() + 1, IsStarlink: false, ASN: "AS11404", Org: "Qwest"})
+	if d.link.OnStarlink || d.link.Reason != "egress-other" {
+		t.Fatalf("fresh geo without dish belief: %+v", d.link)
 	}
 }
 
