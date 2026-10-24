@@ -4,3 +4,6 @@ backend/hist.json
 backend/daily.json
 backend/events.jsonl
 backend/events.old.jsonl
+/.derpcode/
+/.opencode/
+backend/box/

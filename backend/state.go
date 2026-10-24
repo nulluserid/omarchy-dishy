@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"time"
 
 	api "starlinkd/gen/spacex_api/device/device"
@@ -12,6 +13,12 @@ const (
 	ringSize        = 900 // history samples, 1s apart
 	sampleIntervalS = 1
 	rpcTimeout      = 3 * time.Second // per RPC; dish may vanish mid-tick
+
+	// Link/panel dynamics (CONTRACT.md "Link state & marker").
+	linkGraceWindow = 10 * time.Minute // hide delay once evidence stops
+	probeWindow     = 30 * time.Second // fast-poll burst after a failure or route change
+	panelLease      = 90 * time.Second // dashboard-open lease; QML heartbeats every 60s
+	starlinkASN     = "AS14593"
 )
 
 // Array index order inside daemon.arrays.
@@ -25,12 +32,16 @@ const (
 )
 
 type config struct {
-	target      string
-	interval    time.Duration
-	mapInterval time.Duration
-	once        bool
-	verbose     bool
-	dir         string // state dir, ~/.local/state/starlinkd
+	target                string
+	interval              time.Duration // poll cadence while the dashboard is open
+	idleInterval          time.Duration // poll cadence while the dashboard is closed
+	idleHistInterval      time.Duration // background history refresh while closed
+	mapInterval           time.Duration
+	geoInterval           time.Duration // egress lookup while on-network
+	geoTransitionInterval time.Duration // egress lookup while classifying / dashboard just opened
+	once                  bool
+	verbose               bool
+	dir                   string // state dir, ~/.local/state/starlinkd
 }
 
 // ---- status.json ----
@@ -91,6 +102,28 @@ type gpsStats struct {
 	Sats  int64 `json:"sats"`
 }
 
+// linkInfo is the off-network UI marker: QML hides the widget whenever
+// onStarlink is false; consumers that predate this field never see it.
+type linkInfo struct {
+	OnStarlink bool   `json:"onStarlink"`
+	Reason     string `json:"reason"`     // dish|lan|egress|network-changed|egress-other|grace|unknown
+	Since      int64  `json:"since"`      // unix s of the last onStarlink flip
+	LastDishOK int64  `json:"lastDishOK"` // unix s of the last successful dish RPC
+}
+
+// geoInfo is the egress lookup result (ifconfig.co/json): public IP plus an
+// approximate exit location and the carrier the traffic leaves through.
+type geoInfo struct {
+	Ts         int64  `json:"ts"`
+	IP         string `json:"ip,omitempty"`
+	City       string `json:"city,omitempty"`
+	Region     string `json:"region,omitempty"`
+	Country    string `json:"country,omitempty"`
+	ASN        string `json:"asn,omitempty"`
+	Org        string `json:"org,omitempty"`
+	IsStarlink bool   `json:"isStarlink"`
+}
+
 type statusFile struct {
 	Ts          int64       `json:"ts"`
 	Ok          bool        `json:"ok"`
@@ -107,6 +140,8 @@ type statusFile struct {
 	Alerts      []alert     `json:"alerts"`
 	Update      updateStats `json:"update"`
 	Gps         gpsStats    `json:"gps"`
+	Link        linkInfo    `json:"link"`
+	Geo         *geoInfo    `json:"geo,omitempty"`
 }
 
 // ---- hist.json ----
@@ -185,9 +220,9 @@ type daemon struct {
 	lastOutages []outage  // dish-reported outages, last history
 	hasHist     bool
 
-	daily         dailyFile
-	sessionTicks  int
-	sessionOnline int
+	daily            dailyFile
+	sessionS         int64 // wall seconds since daemon start, link-gated
+	sessionOnlineS   int64
 
 	prevState  string
 	prevAlerts map[string]bool
@@ -200,6 +235,28 @@ type daemon struct {
 
 	mapData *obsMap
 	lastMap time.Time
+	lastHist time.Time // last successful history ingest (drives idle cadence)
+
+	// Link state (backend/link.go). Consumers: only the tick loop.
+	link        linkInfo // onStarlink/reason/since/lastDishOK, published in status.json
+	lastPositive int64   // unix s of the last on-starlink evidence
+	lastDishOK  bool     // outcome of the most recent GetStatus
+	geo         geoInfo  // last egress lookup; Ts=0 until the first call
+	geoFetching bool     // an egress lookup is in flight
+	geoBump     bool     // dashboard (re)opened: refresh geo if older than transition interval
+	geoCh       chan geoInfo
+	lastRoute    string // default-route fingerprint, "" = no default route
+	lastRouteKnown bool
+	routeChanged  bool // fingerprint changed since the last geo launch
+	probeUntil   time.Time // one-shot fast-poll burst end
+	panelUntil   time.Time // dashboard-open lease end
+	lastTickAt   time.Time // previous round's tick time, for elapsed dt
+	lastTickOK   bool
+	dishBase     net.IP // dish target /24
+	dishMask     net.IPMask
+	ctrlLn       net.Listener // panel control socket (optional)
+	ctrlPath     string
+	ctrlCh       chan string
 
 	lastStatus *dish.DishGetStatusResponse // last good status, for dish info on failures
 	lastObs    obsStats
@@ -208,9 +265,31 @@ type daemon struct {
 }
 
 func newDaemon(cfg config, client api.DeviceClient) *daemon {
-	d := &daemon{cfg: cfg, client: client, hyst: newHyst(60, 300), startWall: time.Now()}
+	d := &daemon{
+		cfg:        cfg,
+		client:     client,
+		hyst:       newHyst(60, 300),
+		startWall:  time.Now(),
+		lastTickAt: time.Now(),
+		geoCh:      make(chan geoInfo, 1),
+		ctrlCh:     make(chan string, 4),
+	}
+	d.dishBase, d.dishMask = dishSubnet(cfg.target)
 	d.resetArrays()
 	return d
+}
+
+// dishSubnet derives the /24 around the dish target. A named target (rare)
+// falls back to the default dish LAN.
+func dishSubnet(target string) (net.IP, net.IPMask) {
+	mask := net.CIDRMask(24, 32)
+	base := net.ParseIP("192.168.100.0").To4()
+	if host, _, err := net.SplitHostPort(target); err == nil {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() != nil {
+			base = ip.To4().Mask(mask)
+		}
+	}
+	return base, mask
 }
 
 func (d *daemon) resetArrays() {

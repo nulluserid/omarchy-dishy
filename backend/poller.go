@@ -47,69 +47,107 @@ func (d *daemon) warn(msg string) {
 
 // tick runs one poll cycle. It never panics and never blocks longer than
 // ~3 RPC timeouts; every error path still refreshes the state files.
-func (d *daemon) tick() {
+// active means the dashboard is open (or the probe burst is running): fast
+// cadence, hist.json writes, obstruction-map refreshes.
+func (d *daemon) tick(active bool) {
 	now := time.Now()
+	d.drainGeo()
+	d.updateRoute(now)
+	d.maybeFetchGeo(now, active)
+
+	dt := now.Sub(d.lastTickAt) // real elapsed: the cadence varies idle/active
+	d.lastTickAt = now
+
+	// History ingest runs every active tick and every idleHistInterval in the
+	// background (keeps dailies accurate and the ring current at 60s cost).
+	fetchHist := active || now.Sub(d.lastHist) >= d.cfg.idleHistInterval
 
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	resp, err := d.client.Handle(ctx, &api.Request{Request: &api.Request_GetStatus{GetStatus: &api.GetStatusRequest{}}})
 	cancel()
 	if err != nil {
-		d.failTick(now, rpcErr(err))
+		d.failTick(now, rpcErr(err), dt, active)
 		return
 	}
 	d.warn("") // success resets rate-limit key
 
-	d.goodTick(now, resp.GetDishGetStatus())
+	d.goodTick(now, resp.GetDishGetStatus(), active, fetchHist, dt)
 }
 
-func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse) {
+// postTick books the one-shot probe: only the transition into failure starts
+// a burst, so a machine parked away from the dish does not permanently poll
+// at 2 s.
+func (d *daemon) postTick(now time.Time, ok bool) {
+	if !ok && d.lastTickOK {
+		now := now
+		d.probeUntil = now.Add(probeWindow)
+		d.vlog("failure probe: %s window", probeWindow)
+	}
+	d.lastTickOK = ok
+}
+
+func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, fetchHist bool, dt time.Duration) {
 	state, detail := deriveState(s)
 	d.lastStatus = s
+	d.updateLink(now, true)
 
 	// History: delta-process the ring and refresh dish-reported outages.
 	histOK := false
 	var res ingestResult
-	h := d.fetch(now, &api.Request{Request: &api.Request_GetHistory{GetHistory: &api.GetHistoryRequest{}}})
-	if hh := h.GetDishGetHistory(); hh != nil && len(hh.GetPopPingLatencyMs()) == ringSize {
-		uptime, haveUp := uint64(0), false
-		if ds := s.GetDeviceState(); ds != nil {
-			uptime, haveUp = ds.GetUptimeS(), true
+	if fetchHist {
+		// Freshness window for dish-reported outages spans the ingest gap:
+		// with a 60 s background cadence an outage observed on resume is
+		// still announced, while a settled ring stays watermark-only.
+		ingestGap := now.Sub(d.lastHist)
+		var h *api.Response
+		h = d.fetch(now, &api.Request{Request: &api.Request_GetHistory{GetHistory: &api.GetHistoryRequest{}}})
+		if hh := h.GetDishGetHistory(); hh != nil && len(hh.GetPopPingLatencyMs()) == ringSize {
+			uptime, haveUp := uint64(0), false
+			if ds := s.GetDeviceState(); ds != nil {
+				uptime, haveUp = ds.GetUptimeS(), true
+			}
+			res = d.ingest(hh, uptime, haveUp, now)
+			d.lastHist = now
+			d.observeDishOutages(hh.GetOutages(), now, ingestGap)
+			d.lastOutages = toOutages(hh.GetOutages())
+			histOK = true
+		} else if h != nil {
+			d.vlog("history: short response")
 		}
-		res = d.ingest(hh, uptime, haveUp, now)
-		d.observeDishOutages(hh.GetOutages(), now)
-		d.lastOutages = toOutages(hh.GetOutages())
-		histOK = true
-	} else if h != nil {
-		d.vlog("history: short response")
 	}
 
-	// Obstruction map on its own slower cadence (also on the first tick).
-	if now.Sub(d.lastMap) >= d.cfg.mapInterval {
+	// Obstruction map is only needed for the dashboard: skip entirely while
+	// the panel is closed. On the first open the last map is minutes old —
+	// good enough until the next active due tick refreshes it.
+	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
 		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}}); m != nil {
 			d.mapData = toObsMap(m.GetDishGetObstructionMap())
 			d.lastMap = now
 		}
 	}
 
-	// Daily/session counters.
+	// Daily/session counters — only while on the Starlink network
+	// (CONTRACT.md "Off-network accounting": parked elsewhere ≠ dish downtime).
 	d.rollDaily(now)
-	if histOK {
-		d.daily.DownBytes += res.downBytes
-		d.daily.UpBytes += res.upBytes
-	} else {
-		secs := d.cfg.interval.Seconds()
-		d.daily.DownBytes += int64(s.GetDownlinkThroughputBps() / 8 * float32(secs))
-		d.daily.UpBytes += int64(s.GetUplinkThroughputBps() / 8 * float32(secs))
-	}
-	dt := int64(d.cfg.interval.Seconds())
-	d.daily.TotalS += dt
-	d.sessionTicks++
-	if state == "ONLINE" {
-		d.daily.OnlineS += dt
-		d.sessionOnline++
+	if d.link.OnStarlink {
+		if histOK {
+			d.daily.DownBytes += res.downBytes
+			d.daily.UpBytes += res.upBytes
+		} else {
+			secs := dt.Seconds()
+			d.daily.DownBytes += int64(s.GetDownlinkThroughputBps() / 8 * float32(secs))
+			d.daily.UpBytes += int64(s.GetUplinkThroughputBps() / 8 * float32(secs))
+		}
+		dtS := int64(dt.Seconds() + 0.5)
+		d.daily.TotalS += dtS
+		d.sessionS += dtS
+		if state == "ONLINE" {
+			d.daily.OnlineS += dtS
+			d.sessionOnlineS += dtS
+		}
 	}
 
-	d.handleTransitions(now, s, state)
+	d.handleTransitions(now, s, state, dt)
 
 	// Close an open outage once we are back online.
 	if d.openOutage != nil && state == "ONLINE" {
@@ -122,30 +160,40 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse) {
 	d.failed = 0
 
 	sf := d.buildStatus(now, s, state, detail)
-	hf := d.buildHist(now)
+	// hist.json is written on active ticks (the only consumer reads it while
+	// the panel is open); idle ticks keep the ring in memory only.
+	var hf *histFile
+	if active {
+		hf = d.buildHist(now)
+	}
 	d.persist(now, sf, hf)
 }
 
-// failTick handles a failed GetStatus: state OFFLINE, ok:false, fresh files.
-func (d *daemon) failTick(now time.Time, msg string) {
+// failTick handles a failed GetStatus: state OFFLINE, ok:false, fresh status.
+func (d *daemon) failTick(now time.Time, msg string, dt time.Duration, active bool) {
 	d.failed++
 	d.warn("status rpc: " + msg)
-	if d.failed >= 2 && d.openOutage == nil && d.warm {
-		// Contract: an outage is >=2 consecutive failed ticks. Warm-gated:
-		// a daemon that starts while the dish is already unreachable stays
-		// quiet (e.g. boot races), same as dish-reported outages.
-		d.openOutage = &outageTrack{cause: "OFFLINE", start: now.Unix()}
-		d.daily.Outages++
-		d.emit(event{Type: "outage_start", Cause: "OFFLINE"},
-			"Starlink offline", humanizeCause("OFFLINE"))
+	d.updateLink(now, false)
+	if d.link.OnStarlink {
+		if d.failed >= 2 && d.openOutage == nil && d.warm {
+			// Contract: an outage is >=2 consecutive failed ticks. Warm-gated:
+			// a daemon that starts while the dish is already unreachable stays
+			// quiet (e.g. boot races), same as dish-reported outages. Gated on
+			// the link marker too: a machine parked away from the dish never
+			// raises a false outage (or notification).
+			d.openOutage = &outageTrack{cause: "OFFLINE", start: now.Unix()}
+			d.daily.Outages++
+			d.emit(event{Type: "outage_start", Cause: "OFFLINE"},
+				"Starlink offline", humanizeCause("OFFLINE"))
+		}
+		d.rollDaily(now)
+		dtS := int64(dt.Seconds() + 0.5)
+		d.daily.TotalS += dtS
+		d.sessionS += dtS
 	}
-	d.rollDaily(now)
-	d.daily.TotalS += int64(d.cfg.interval.Seconds())
-	d.sessionTicks++
 
 	sf := d.buildStatusFail(now, msg)
-	hf := d.buildHist(now)
-	d.persist(now, sf, hf)
+	d.persist(now, sf, nil)
 }
 
 // fetch performs one unary Handle call; nil response on any failure.
@@ -308,14 +356,17 @@ func toOutages(list []*dish.DishOutage) []outage {
 }
 
 // observeDishOutages fires outage_start for an outage the dish reports as
-// just beginning. Historical entries only prime the watermark.
-func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time) {
+// just beginning. Historical entries only prime the watermark. The freshness
+// window derives from the ingest gap: a ring skimmed every 60 s still
+// announces windows that open during the gap.
+func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time, gap time.Duration) {
+	window := int64(gap.Seconds()) + 2
 	for _, o := range list {
 		start := o.GetStartTimestampNs() / 1e9
 		if start <= d.maxDishOutageStart {
 			continue
 		}
-		fresh := now.Unix()-start <= int64(d.cfg.interval.Seconds())*2+2
+		fresh := gap > 0 && now.Unix()-start <= window
 		d.maxDishOutageStart = start
 		if fresh && d.openOutage == nil && d.warm {
 			cause := o.GetCause().String()
@@ -329,7 +380,7 @@ func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time) {
 
 // ---- transitions, alerts, hysteresis ----
 
-func (d *daemon) handleTransitions(now time.Time, s *dish.DishGetStatusResponse, state string) {
+func (d *daemon) handleTransitions(now time.Time, s *dish.DishGetStatusResponse, state string, dt time.Duration) {
 	if d.warm && state != d.prevState {
 		d.emit(event{Type: "state_change", From: d.prevState, To: state}, "", "")
 		d.vlog("state %s -> %s", d.prevState, state)
@@ -357,7 +408,7 @@ func (d *daemon) handleTransitions(now time.Time, s *dish.DishGetStatusResponse,
 	d.prevAlerts = cur
 
 	fraction := float64(s.GetObstructionStats().GetFractionObstructed())
-	if d.hyst.step(fraction, d.cfg.interval.Seconds()) {
+	if d.hyst.step(fraction, dt.Seconds()) {
 		d.emit(event{Type: "obstruction_heavy", Fraction: round(fraction, 5)},
 			"Starlink obstructed", fmt.Sprintf("%.1f%% obstruction, last 60s", fraction*100))
 	}
@@ -422,7 +473,7 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 		},
 		Avail: availStats{
 			TodayPct:   pct(d.daily.OnlineS, d.daily.TotalS),
-			SessionPct: pct(int64(d.sessionOnline), int64(d.sessionTicks)),
+			SessionPct: pct(d.sessionOnlineS, d.sessionS),
 		},
 		Obs: obsStats{
 			Fraction:        round(float64(o.GetFractionObstructed()), 5),
@@ -438,6 +489,11 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 			Valid: s.GetGpsStats().GetGpsValid(),
 			Sats:  int64(s.GetGpsStats().GetGpsSats()),
 		},
+		Link: d.link,
+	}
+	if d.geo.Ts > 0 {
+		g := d.geo
+		sf.Geo = &g
 	}
 	d.lastObs = sf.Obs
 	return sf
@@ -472,7 +528,12 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 	}
 	sf.Avail = availStats{
 		TodayPct:   pct(d.daily.OnlineS, d.daily.TotalS),
-		SessionPct: pct(int64(d.sessionOnline), int64(d.sessionTicks)),
+		SessionPct: pct(d.sessionOnlineS, d.sessionS),
+	}
+	sf.Link = d.link
+	if d.geo.Ts > 0 {
+		g := d.geo
+		sf.Geo = &g
 	}
 	return sf
 }

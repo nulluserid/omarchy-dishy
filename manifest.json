@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.nulluserid.dishy",
   "name": "Dishy",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "legend",
   "description": "Starlink dish status in the bar with a live dashboard popup",
   "kinds": [
@@ -19,7 +19,8 @@
     "defaultSection": "right",
     "defaults": {
       "show": "latency",
-      "interval": 1000
+      "interval": 2000,
+      "autoHide": "on"
     },
     "schema": [
       {
@@ -34,13 +35,24 @@
         "defaultValue": "latency"
       },
       {
+        "key": "autoHide",
+        "type": "enum",
+        "label": "Hide when not on Starlink",
+        "description": "Widget hides itself while the machine is on another network. It reappears automatically when the dish is reachable again.",
+        "options": [
+          "on",
+          "off"
+        ],
+        "defaultValue": "on"
+      },
+      {
         "key": "interval",
         "type": "integer",
-        "label": "Refresh interval (ms)",
+        "label": "Bar refresh interval (ms)",
         "min": 500,
         "max": 10000,
         "step": 500,
-        "defaultValue": 1000
+        "defaultValue": 2000
       }
     ]
   }

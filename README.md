@@ -20,11 +20,23 @@ backend service. The bar widget shows live data within ~2 seconds.
   attention / red offline / gray no data) and live latency, down throughput, or
   icon only (click the widget's settings). Tooltip carries the full one-line
   summary.
+- **Auto-hide off-network (1.1):** when the machine is not on a Starlink
+  network, the widget hides itself — the dish's exact gRPC target no longer
+  answers, no local address sits in its subnet, and your traffic provably
+  exits through another carrier — while `starlinkd` keeps checking in the
+  background (10 s ticks). Back on Starlink, the widget reappears by itself;
+  no shell restart, no service restart. During connection drops, captive
+  portals, or missing evidence the widget keeps showing for 10 minutes
+  (grace) first. Turn it off with the widget's *Hide when not on Starlink*
+  setting.
 - **Panel** (click the widget):
   - state chip, dish uptime, hardware/software versions, GPS + ethernet link
   - latency graph (15 min, 1 s resolution) with p50/p95 guides
   - down/up throughput and power draw graphs, per-sample drop strip
   - recent outages with cause and duration (dish-reported)
+  - public IP + approximate exit city/region and carrier — one ifconfig.co
+    lookup every few minutes, no API key — where your traffic leaves the
+    Starlink network
   - obstruction view (the dish's sky-coverage map) + obstructed fraction
   - data used today/all-time, availability today/session
   - active dish alert chips and software-update state
@@ -32,7 +44,8 @@ backend service. The bar widget shows live data within ~2 seconds.
 - **Notifications:** desktop notification when an outage starts and ends, when
   a dish alert sets, and on sustained heavy obstruction. Notifications fire on
   transitions; a dish that is already unreachable when the daemon starts stays
-  quiet on purpose.
+  quiet on purpose — and (1.1) they never fire for a machine parked on another
+  network: off-network time is not counted as dish downtime.
 
 ## Requirements
 
@@ -46,7 +59,7 @@ backend service. The bar widget shows live data within ~2 seconds.
 dependencies, deterministically built with `CGO_ENABLED=0 -trimpath
 -buildvcs=false` and version-stamped to the release tag — verify with
 `go version -m backend/bin/starlinkd` and `backend/bin/starlinkd -version`).
-To rebuild it yourself at tag `v1.0.0`: `backend/build.sh` needs `go` (≥ 1.27, matching backend/go.mod)
+To rebuild it yourself at a tag: `backend/build.sh` needs `go` (≥ 1.27, matching backend/go.mod)
 and `protoc`; the protobuf descriptors are captured from the dish itself via
 gRPC reflection (`backend/proto/dish.pb`) — nothing hand-maintained.
 
@@ -77,15 +90,34 @@ starlinkd (Go daemon, one static binary)          Dishy plugin (QML)
   gRPC 192.168.100.1:9200 — GetStatus +            bar widget + dashboard,
   GetHistory cursor-delta over the dish's          reads the state files,
   900-sample ring, derives stats once,             never talks to the dish
-  writes atomic JSON every 2 s  ──────────────▶    (FileView + JSON.parse)
+  writes atomic JSON  ──────────────────────▶      (FileView + JSON.parse)
 ```
 
-State lives in `~/.local/state/starlinkd/`: `status.json` (scalars, every 2 s),
-`hist.json` (15-min time-ordered series + obstruction map), `daily.json`
-(today + all-time usage/availability), `events.jsonl` (transition log). The
-full contract is documented in [`backend/CONTRACT.md`](backend/CONTRACT.md).
+The poll adapts to how it is actually used (v2):
 
-Dish controls and the poller CLI: `backend/bin/starlinkd stow|unstow|reboot`.
+| Situation                        | Status writes | History ingest | hist.json | Obstruction map |
+|----------------------------------|--------------:|---------------:|----------:|----------------:|
+| Dashboard open                   | every 2 s     | every 2 s      | every 2 s | every 60 s      |
+| Dashboard closed                 | every 10 s    | every 60 s     | never     | never           |
+| First failure / route change     | 2 s for 30 s  | 2 s            | —         | —               |
+
+Opening the dashboard tells `starlinkd` to refresh immediately and poll fast
+(`starlinkd panel open` over a small Unix socket); closing it returns to idle
+at once. Off-network detection is evidence-based — the exact dish gRPC
+target, the dish LAN subnet, and the egress carrier (`AS14593` via
+`ifconfig.co`) — with a 10-minute grace when there is no evidence at all
+(captive portal, dish outage). A parked machine costs ~1 KB of status JSON
+every 10 s and one `/proc/net/route` read per tick: no per-tick process
+spawns, no polling threads, no hist writes, no notification spam.
+
+State lives in `~/.local/state/starlinkd/`: `status.json` (scalars +
+`link`/`geo`), `hist.json` (15-min time-ordered series + obstruction map,
+written only while the dashboard is open), `daily.json` (today + all-time
+usage/availability), `events.jsonl` (transition log). The full contract is
+documented in [`backend/CONTRACT.md`](backend/CONTRACT.md).
+
+Dish controls and the poller CLI: `backend/bin/starlinkd stow|unstow|reboot`;
+the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`.
 
 ## License
 

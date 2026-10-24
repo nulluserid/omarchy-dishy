@@ -28,7 +28,15 @@ function num(v, fallback) {
 function isStale(status, nowS) {
   if (!status) return true
   var ts = num(status.ts, 0)
-  return ts <= 0 || nowS - ts > 10
+  return ts <= 0 || nowS - ts > 30
+}
+
+// True only on a positive off-network marker from the daemon (CONTRACT.md
+// "link"). Missing link block (older daemon) or old data: never hide — the
+// stale styling already covers interrupted daemons.
+function isOffNetwork(status) {
+  var link = status ? status.link : null
+  return !!link && link.onStarlink === false
 }
 
 function hasObstructionAlert(status) {
@@ -132,6 +140,15 @@ function decimate(values, buckets) {
     out.push(count ? sum / count : null)
   }
   return out
+}
+
+// "City, Region, CC" from the daemon's egress lookup; null when unknown.
+function geoPlace(geo) {
+  var parts = geo ? [geo.city, geo.region, geo.country] : []
+  var out = []
+  for (var i = 0; i < parts.length; i++)
+    if (parts[i]) out.push(String(parts[i]))
+  return out.length ? out.join(", ") : null
 }
 
 // One-line bar tooltip summary.
