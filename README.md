@@ -22,8 +22,8 @@ backend service. The bar widget shows live data within ~2 seconds.
   summary.
 - **Auto-hide off-network (1.1):** when the machine is not on a Starlink
   network, the widget hides itself — the dish's exact gRPC target no longer
-  answers, no local address sits in its subnet, and your traffic provably
-  exits through another carrier — while `starlinkd` keeps checking in the
+  answers *as a Starlink dish*, and your traffic provably exits through
+  another carrier — while `starlinkd` keeps checking in the
   background (10 s ticks). Back on Starlink, the widget reappears by itself;
   no shell restart, no service restart. During connection drops, captive
   portals, or missing evidence the widget keeps showing for 10 minutes
@@ -103,9 +103,12 @@ The poll adapts to how it is actually used (v2):
 
 Opening the dashboard tells `starlinkd` to refresh immediately and poll fast
 (`starlinkd panel open` over a small Unix socket); closing it returns to idle
-at once. Off-network detection is evidence-based — the exact dish gRPC
-target, the dish LAN subnet, and the egress carrier (`AS14593` via
-`ifconfig.co`) — with a 10-minute grace when there is no evidence at all
+at once. Off-network detection is evidence-based — the exact dish gRPC target
+answering back *as a Starlink dish* (dish device info present; a cable modem
+squatting on that address does not count) and the egress carrier (`AS14593`
+via `ifconfig.co`; the dish LAN subnet is deliberately not a signal — router
+mode LANs use 192.168.5.x/10.0.0.x while all of them route the dish address)
+— with a 10-minute grace when there is no evidence at all
 (captive portal, dish outage). A parked machine costs ~1 KB of status JSON
 every 10 s and one `/proc/net/route` read per tick: no per-tick process
 spawns, no polling threads, no hist writes, no notification spam.

@@ -1,7 +1,7 @@
 package main
 
 import (
-	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -333,11 +333,12 @@ func TestFailTickNotifyWarmGate(t *testing.T) {
 	d := newDaemon(config{}, nil)
 	d.cfg.dir = t.TempDir() // failTick persists; keep writes out of CWD
 	d.startWall = t0.Add(-time.Hour)
-	// On the dish's LAN: this is the canonical at-home dark-dish case — LAN
-	// evidence keeps the link CONFIRMED while the RPC is down, so the outage
-	// machinery still runs. Synthetic addrs keep the test hermetic.
-	d.addrsFn = func() ([]net.Addr, error) { return []net.Addr{mkAddr("192.168.100.9/32")}, nil }
-	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: t0.Unix()}
+	// The canonical at-home dark-dish case with no LAN signal: fresh egress
+	// says Starlink, which keeps the link CONFIRMED while the RPC is down.
+	// No route change ever happened (lastRouteChangedUnix = 0), so the geo
+	// trivially postdates it and the outage gate stays open.
+	d.geo = geoInfo{Ts: t0.Unix() - 5, IsStarlink: true, ASN: starlinkASN, Org: "SpaceX"}
+	d.link = linkInfo{OnStarlink: true, Reason: "egress", Since: t0.Unix()}
 	d.lastPositive = t0.Unix()
 	for i := 0; i < 3; i++ {
 		d.failTick(t0.Add(time.Duration(i)*2*time.Second), "refused", 2*time.Second, false)
@@ -352,5 +353,138 @@ func TestFailTickNotifyWarmGate(t *testing.T) {
 	d.failTick(t0.Add(12*time.Second), "refused", 2*time.Second, false)
 	if sent != 1 {
 		t.Fatalf("post-warm outage sent %d notifications, want 1", sent)
+	}
+}
+
+func TestEgressOutageRouteGate(t *testing.T) {
+	// An egress-confirmed outage must not fire from a geo answer that
+	// predates the current default route: "left home, the new network is
+	// dead" is leaving, not dish downtime — even though the stale home geo
+	// still says AS14593.
+	sent := 0
+	realSend := notifySend
+	notifySend = func(summary, body string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	d := newDaemon(config{}, nil)
+	d.cfg.dir = t.TempDir()
+	d.startWall = t0.Add(-time.Hour)
+	d.warm = true
+	d.lastRouteChangedUnix = t0.Unix() // route changed now: just left home
+	// Stale home answer, captured before the route change.
+	d.geo = geoInfo{Ts: t0.Unix() - 60, IsStarlink: true, ASN: starlinkASN, Org: "SpaceX"}
+	d.link = linkInfo{OnStarlink: true, Reason: "egress", Since: t0.Unix() - 3600}
+	d.lastPositive = t0.Unix() - 60
+
+	for i := 0; i < 3; i++ {
+		d.failTick(t0.Add(time.Duration(i)*10*time.Second), "refused", 10*time.Second, false)
+	}
+	if sent != 0 || d.openOutage != nil {
+		t.Fatalf("stale pre-change geo raised an outage: sent=%d track=%v", sent, d.openOutage)
+	}
+
+	// The next egress answer is captured after the route change and still
+	// says Starlink: the machine genuinely sits on the dish's network, so
+	// the persisting RPC failure is real downtime and fires.
+	d.geo = geoInfo{Ts: t0.Unix() + 35, IsStarlink: true, ASN: starlinkASN, Org: "SpaceX"}
+	d.failTick(t0.Add(40*time.Second), "refused", 10*time.Second, false)
+	d.failTick(t0.Add(50*time.Second), "refused", 10*time.Second, false)
+	if sent != 1 || d.openOutage == nil {
+		t.Fatalf("post-change egress outage did not fire: sent=%d track=%v", sent, d.openOutage)
+	}
+}
+
+func TestEgressOutageDishOKGate(t *testing.T) {
+	// Mirror of TestEgressOutageRouteGate: the gate also opens when an
+	// identity-verified dish answer postdates the route change — a real
+	// at-home dish outage behind a transient route change still notifies,
+	// even when egress lookups keep failing (dish deaths normally take the
+	// internet down with them).
+	sent := 0
+	realSend := notifySend
+	notifySend = func(summary, body string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	d := newDaemon(config{}, nil)
+	d.cfg.dir = t.TempDir()
+	d.startWall = t0.Add(-time.Hour)
+	d.warm = true
+	d.lastRouteChangedUnix = t0.Unix() // route changed now (transient, at home)
+	// Stale home geo from before the change; post-change lookups keep
+	// failing, so it stays the freshest answer.
+	d.geo = geoInfo{Ts: t0.Unix() - 60, IsStarlink: true, ASN: starlinkASN, Org: "SpaceX"}
+	d.link = linkInfo{OnStarlink: true, Reason: "egress", Since: t0.Unix() - 3600, LastDishOK: t0.Unix() - 120}
+	d.lastPositive = t0.Unix() - 60
+
+	for i := 0; i < 3; i++ {
+		d.failTick(t0.Add(time.Duration(i)*10*time.Second), "refused", 10*time.Second, false)
+	}
+	if sent != 0 || d.openOutage != nil {
+		t.Fatalf("pre-change dish answer did not suppress: sent=%d track=%v", sent, d.openOutage)
+	}
+
+	// One identity-verified answer at +20 (dish blipped back once): the
+	// machine is provably on the dish's network now, so a persisting
+	// RPC failure is real downtime and fires.
+	d.link.LastDishOK = t0.Unix() + 20
+	d.failTick(t0.Add(40*time.Second), "refused", 10*time.Second, false)
+	d.failTick(t0.Add(50*time.Second), "refused", 10*time.Second, false)
+	if sent != 1 || d.openOutage == nil {
+		t.Fatalf("post-change dish answer did not re-arm the gate: sent=%d track=%v", sent, d.openOutage)
+	}
+}
+
+func TestNotADishAnswer(t *testing.T) {
+	// A device that answers the RPC without dish identity — e.g. a cable
+	// modem or router holding 192.168.100.1 — must NOT count as dish
+	// evidence: the tick fails with an explicit error, the link never reports
+	// reason "dish", and no outage machinery runs.
+	sent := 0
+	realSend := notifySend
+	notifySend = func(string, string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	now := time.Now()
+	for name, status := range map[string]*dish.DishGetStatusResponse{
+		"nil answer":     nil,
+		"no device info": {},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := mkStub()
+			c.status = status
+			d := newDaemon(config{
+				interval: 2 * time.Second, idleInterval: 10 * time.Second,
+				idleHistInterval: time.Minute, mapInterval: time.Minute,
+				geoInterval: time.Hour, geoTransitionInterval: time.Hour,
+			}, c)
+			d.cfg.dir = t.TempDir()
+			d.warm = true
+			// Fresh non-Starlink egress (a cable ISP): classification there
+			// rests entirely on dish identity, which the stub mocks out.
+			d.geo = geoInfo{Ts: now.Unix(), IsStarlink: false, ASN: "AS11404", Org: "Qwest"}
+			d.link = linkInfo{OnStarlink: false, Reason: "egress-other", Since: now.Unix()}
+			d.lastDishOK = true
+			d.link.LastDishOK = now.Unix() - 10 // must NOT be renewed without identity
+
+			d.tick(false)
+
+			if sent != 0 {
+				t.Fatalf("identity failure sent %d notifications, want 0", sent)
+			}
+			sf := readJSON(t, d.cfg.dir, "status.json")
+			if sf["ok"] != false || sf["state"] != "OFFLINE" {
+				t.Fatalf("tick did not fail: ok=%v state=%v", sf["ok"], sf["state"])
+			}
+			if err, _ := sf["error"].(string); !strings.Contains(err, "not answering as a Starlink dish") {
+				t.Fatalf("error = %q", err)
+			}
+			link, _ := sf["link"].(map[string]any)
+			if link["reason"] == "dish" {
+				t.Fatalf("reason = %v, no dish identity means no dish evidence", link["reason"])
+			}
+			if link["lastDishOK"].(float64) != float64(now.Unix()-10) {
+				t.Fatalf("lastDishOK = %v, want untouched %d", link["lastDishOK"], now.Unix()-10)
+			}
+		})
 	}
 }

@@ -80,9 +80,18 @@ func (d *daemon) tick(active bool) {
 		d.postTick(now, false)
 		return
 	}
+	s := resp.GetDishGetStatus()
+	// Identity check: an answer counts as dish evidence only when it comes
+	// back AS a Starlink dish. Residential cable modems / routers can hold
+	// the dish's address and respond, but never with dish device info.
+	if s == nil || s.GetDeviceInfo() == nil {
+		d.failTick(now, "not answering as a Starlink dish (no device info)", dt, active)
+		d.postTick(now, false)
+		return
+	}
 	d.warn("") // success resets rate-limit key
 
-	d.goodTick(now, resp.GetDishGetStatus(), active, fetchHist, dt)
+	d.goodTick(now, s, active, fetchHist, dt)
 	d.postTick(now, true)
 }
 
@@ -101,6 +110,11 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	state, detail := deriveState(s)
 	d.lastStatus = s
 	d.updateLink(now, true)
+	// Identity-verified dish answer: advance the stamp exactly here — the
+	// only path that ever does (applyGeo's link recompute carries reason
+	// without stamping). The outage gate (failTick) treats this field as
+	// "a real dish answer postdates X".
+	d.link.LastDishOK = now.Unix()
 
 	// History: delta-process the ring and refresh dish-reported outages.
 	histOK := false
@@ -182,15 +196,29 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 
 // failTick handles a failed GetStatus: state OFFLINE, ok:false, fresh status.
 // Outage tracking and daily booking require CONFIRMED evidence of being on
-// Starlink (dish/lan/egress) — a grace hold or a no-evidence state books
-// nothing and notifies nothing (a parked or portal-walled machine is not
-// dish downtime).
+// Starlink (dish/egress) — a grace hold or a no-evidence state books nothing
+// and notifies nothing (a parked or portal-walled machine is not dish
+// downtime).
+//
+// Egress-confirmed outages carry one extra gate: the geo answer must postdate
+// the last default-route change. Stale home geo still says AS14593 after
+// leaving, and "walked out of Wi-Fi range into a dead network" is leaving,
+// not dish downtime — the announcement waits for evidence captured on the
+// current route. The gate opens on either post-change signal: fresh geo
+// (lookups succeed) or link.lastDishOK — renewed ONLY by identity-verified
+// good ticks, never by geo application — so a real at-home dish outage behind
+// a flaky route still notifies even when egress lookups cannot succeed (dish
+// deaths normally kill that path too). Geo results are stamped at request
+// launch, so a lookup in flight across the route change cannot fake either
+// term. (updateLink has already recomputed the reason, and a failing dish RPC
+// can never leave reason "dish" here, so this gates exactly the egress path.)
 func (d *daemon) failTick(now time.Time, msg string, dt time.Duration, active bool) {
 	d.failed++
 	d.warn("status rpc: " + msg)
 	d.updateLink(now, false)
 	if d.linkConfirmed() {
-		if d.failed >= 2 && d.openOutage == nil && d.warm {
+		if d.failed >= 2 && d.openOutage == nil && d.warm &&
+			(d.geo.Ts >= d.lastRouteChangedUnix || d.link.LastDishOK >= d.lastRouteChangedUnix) {
 			// Contract: an outage is >=2 consecutive failed ticks. Warm-gated:
 			// a daemon that starts while the dish is already unreachable stays
 			// quiet (e.g. boot races), same as dish-reported outages.
