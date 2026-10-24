@@ -50,8 +50,9 @@ func marshalCompact(v any) []byte {
 	return b
 }
 
-// persist writes the three contract files for one tick. Write failures are
-// logged, never fatal.
+// persist writes the contract files for one tick. Write failures are
+// logged, never fatal. hf == nil skips hist.json: idle ticks and failure
+// ticks carry no new history data (CONTRACT.md "hist.json — cadence").
 func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 	write := func(name string, v any) {
 		if err := atomicWrite(filepath.Join(d.cfg.dir, name), marshalCompact(v)); err != nil {
@@ -59,7 +60,9 @@ func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 		}
 	}
 	write("status.json", sf)
-	write("hist.json", hf)
+	if hf != nil {
+		write("hist.json", hf)
+	}
 	write("daily.json", d.daily)
 	d.lastFile = sf
 }

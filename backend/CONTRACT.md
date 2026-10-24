@@ -1,12 +1,18 @@
-# starlinkd ⇄ plugin contract (FROZEN)
+# starlinkd ⇄ plugin contract (v2)
 
 Ground truth: live Starlink Mini, hw `mini1_panda_prod1`, fw `2026.09.08.mr86422`,
 API v43, gRPC `192.168.100.1:9200`, service `SpaceX.API.Device.Device/Handle`.
 Captures in `testdata/*.real.json` are the authoritative field reference.
 
+v2 (2026-10-23) amends v1.0.0: adaptive poll cadence (dashboard closed = 10 s
+idle ticks, no hist writes), a `link` marker that hides the UI off-network, an
+`geo` egress lookup (public IP + exit city), and a `panel open|close` control
+socket. All additions are additive: consumers of the v1 fields work unchanged.
+
 The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/starlinkd/`:
 
-## status.json — every 2s (~1.5KB). Bar widget + panel read this.
+## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
+(short probe burst) closed. (~1.5KB). Bar widget + panel read this.
 
 ```json
 {
@@ -25,17 +31,44 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
   "obs":  { "fraction": 0.00213, "timeObstructedS": 12, "validS": 3177 },
   "alerts": [ { "id": "install_pending", "label": "Install pending" } ],
   "update": { "state": "REBOOT_REQUIRED", "progressPct": 1.0 },
-  "gps": { "valid": true, "sats": 22 }
+  "gps": { "valid": true, "sats": 22 },
+  "link": { "onStarlink": true, "reason": "dish", "since": 1760000000,
+            "lastDishOK": 1760000000 },
+  "geo":  { "ts": 1759999000, "ip": "100.67.10.4", "city": "Fremont",
+            "region": "California", "country": "US", "asn": "AS14593",
+            "org": "Starlink", "isStarlink": true }
 }
 ```
 
 - `state` ∈ ONLINE | SEARCHING | NO_SIGNAL | THERMAL_SHUTDOWN | BOOTING | OFFLINE | NO_DATA
   (no OBSTRUCTED state — this firmware reports no live obstruction flag)
 - `stateDetail`: `SOFTWARE_UPDATE_REBOOT_PENDING` | disablementCode when ≠ OKAY | `""`
-- `ts` staleness: consumers treat data older than 10s as NO_DATA.
+- `ts` staleness: consumers treat data older than 30s as NO_DATA (28s of
+  headroom on the 10 s idle cadence; the bar timer runs at 10 s while hidden).
 - `ok:false`: gRPC failing; `error` carries the last message. `state: OFFLINE`.
+- `link` (v2): off-network UI marker. `onStarlink:false` ⇒ the machine is
+  provably elsewhere: the QML bar widget hides (ModuleSlot → 0 width, layout
+  position preserved), the panel closes, and daily counters freeze (see
+  "Off-network accounting"). `reason` ∈ `dish` (GetStatus answered) | `lan`
+  (local address inside the target's /24) | `egress` (Starlink carrier on the
+  exit path) | `egress-other` (fresh geo with a non-Starlink carrier) | `grace`
+  (no evidence at all: hold the last belief for 10 min from the last evidence,
+  then hide; outage notifications and downtime booking require a confirmed
+  reason, never the grace hold). `since` = unix s of the last `onStarlink`
+  flip; `lastDishOK` = unix s of the last successful GetStatus. Missing
+  `link` block (v1 daemon): consumers must default to visible.
+- `geo` (v2, omitted until the first lookup): egress info from
+  `https://ifconfig.co/json` — public IP, approximate exit city/region/country,
+  carrier (`asn`, `asn_org`), and `isStarlink` (AS14593 or SpaceX/Starlink org
+  string). Refresh: 5 min settled on-network (with the dashboard open, forced
+  on open + every heartbeat whenever the answer is over 60 s old — so at most
+  ≈1/min, the provider's courtesy limit), 1 min while classifying (dish
+  unreachable or default route flipped). No API key. Lookups run off the tick
+  path.
 
-## hist.json — every 2s (~25KB). Panel graphs read this.
+## hist.json — 25KB, written ONLY on active (dashboard-open) ticks; the
+background cadence keeps the ring in memory and refreshes it every 60 s (also
+covering graph gaps across the idle stretch). Panel graphs read this.
 
 ```json
 {
@@ -63,6 +96,17 @@ All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
 ```
 On date change: roll counters into `allTime`, zero today's.
 
+### Off-network accounting (v2)
+
+Counters advance only on confirmed Starlink evidence (`link.reason` ∈
+`dish`|`lan`|`egress`; the grace hold counts nothing), using real elapsed
+seconds per tick — capped at 30 s per tick, so suspend/resume hours are not
+booked as dish downtime (timers freeze across sleep; the first tick after
+waking books one capped tick). Failure ticks off-network add no time, open no
+outages, send no notifications; a link flip off-network closes any open
+outage with a silent `outage_end` event (cause "(left network)"). A machine
+parked on another network does not pollute the dish's availability.
+
 ## events.jsonl — append on transitions; rotate >512KB → events.old.jsonl
 
 ```json
@@ -87,7 +131,10 @@ state_change. `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
 
 Outage = ≥2 consecutive failed ticks or dish-reported outage beginning.
 Notifications are warm-gated: a daemon that starts while the dish is already
-unreachable stays quiet until it has seen ONLINE once. notify-send app-name:
+unreachable stays quiet until it has seen ONLINE once — and (v2) they fire
+only on CONFIRMED Starlink evidence (`link.reason` ∈ `dish`|`lan`|`egress`),
+so a grace hold or an evidence-free network (travel, captive portal before
+login) never produces false "Starlink offline" pings. notify-send app-name:
 "Dishy".
 
 ## CLI controls (dial-on-demand, then exit)
@@ -95,11 +142,28 @@ unreachable stays quiet until it has seen ONLINE once. notify-send app-name:
 `starlinkd stow|unstow|reboot [-t 192.168.100.1:9200]` — exit 0 on success,
 nonzero + stderr message on failure. Reboot = `reboot` request.
 
+## Panel control socket (v2)
+
+`starlinkd panel open|close` — one line (`open\n` / `close\n`) over a Unix
+socket at `$XDG_RUNTIME_DIR/starlinkd.sock` (0600, tmpfs; falls back to the
+state dir). The dashboard QML sends `open` on show (immediate refresh + a
+90 s fast-poll lease with a 60 s heartbeat) and `close` on hide (idle
+immediately). The daemon never blocks on it; failure to connect just means
+idle cadence. The lease covers a crashed shell: 90 s without a heartbeat and
+the daemon drops back to idle by itself — no permanent fast polling. A 30 s
+probe burst also runs once on the first failure after a good tick and on a
+default-route change — one-shot, never while the failure persists.
+
 ## Daemon flags
 
-`starlinkd [-t 192.168.100.1:9200] [-interval 2s] [-map-interval 60s] [-once] [-v]`
-`-once`: single tick, write files, print status.json to stdout, exit.
-`-v`: log transitions + errors to stderr (journald under systemd).
+`starlinkd [-t 192.168.100.1:9200] [-interval 2s] [-idle-interval 10s]
+[-idle-hist-interval 60s] [-map-interval 60s] [-once] [-v]`
+- `-interval`: poll cadence while the dashboard is open (default 2 s).
+- `-idle-interval`: poll cadence while it is closed (default 10 s).
+- `-idle-hist-interval`: background history refresh while closed (default 60 s).
+- `-map-interval`: obstruction map refresh (dashboard open only).
+- `-once`: single tick, write files, print status.json to stdout, exit.
+- `-v`: log transitions + errors to stderr (journald under systemd).
 
 ## Field mapping ground truth (from testdata)
 

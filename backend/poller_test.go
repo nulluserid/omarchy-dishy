@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestObserveDishOutages(t *testing.T) {
 		StartTimestampNs: (now.Unix() - 3600) * 1e9,
 		DurationNs:       60 * 1e9,
 	}}
-	d.observeDishOutages(old, now)
+	d.observeDishOutages(old, now, 4*time.Second)
 	if d.openOutage != nil {
 		t.Fatal("historical outage opened a track")
 	}
@@ -211,7 +212,7 @@ func TestObserveDishOutages(t *testing.T) {
 		StartTimestampNs: (now.Unix() - 1) * 1e9,
 		DurationNs:       1 * 1e9,
 	}}
-	d.observeDishOutages(fresh, now)
+	d.observeDishOutages(fresh, now, 4*time.Second)
 	if d.openOutage == nil || d.openOutage.cause != "BOOTING" {
 		t.Fatalf("openOutage = %+v, want BOOTING track", d.openOutage)
 	}
@@ -332,8 +333,14 @@ func TestFailTickNotifyWarmGate(t *testing.T) {
 	d := newDaemon(config{}, nil)
 	d.cfg.dir = t.TempDir() // failTick persists; keep writes out of CWD
 	d.startWall = t0.Add(-time.Hour)
+	// On the dish's LAN: this is the canonical at-home dark-dish case — LAN
+	// evidence keeps the link CONFIRMED while the RPC is down, so the outage
+	// machinery still runs. Synthetic addrs keep the test hermetic.
+	d.addrsFn = func() ([]net.Addr, error) { return []net.Addr{mkAddr("192.168.100.9/32")}, nil }
+	d.link = linkInfo{OnStarlink: true, Reason: "dish", Since: t0.Unix()}
+	d.lastPositive = t0.Unix()
 	for i := 0; i < 3; i++ {
-		d.failTick(t0.Add(time.Duration(i)*2*time.Second), "refused")
+		d.failTick(t0.Add(time.Duration(i)*2*time.Second), "refused", 2*time.Second, false)
 	}
 	if sent != 0 {
 		t.Fatalf("cold-start failures sent %d notifications, want 0", sent)
@@ -341,8 +348,8 @@ func TestFailTickNotifyWarmGate(t *testing.T) {
 
 	d.warm = true // first good tick happened
 	d.failed = 0
-	d.failTick(t0.Add(10*time.Second), "refused")
-	d.failTick(t0.Add(12*time.Second), "refused")
+	d.failTick(t0.Add(10*time.Second), "refused", 2*time.Second, false)
+	d.failTick(t0.Add(12*time.Second), "refused", 2*time.Second, false)
 	if sent != 1 {
 		t.Fatalf("post-warm outage sent %d notifications, want 1", sent)
 	}

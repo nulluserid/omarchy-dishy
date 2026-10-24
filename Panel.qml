@@ -54,6 +54,22 @@ Panel {
   property string ctlOutput: ""
   property string ctlErrText: ""
 
+  // Panel <-> daemon cadence link: opening the dashboard asks starlinkd for
+  // an immediate refresh and opens the fast-poll lease; a 60 s heartbeat
+  // keeps the lease alive while open; close returns it to idle at once. The
+  // lease itself (90 s) covers a crashed shell (CONTRACT.md "Panel control
+  // socket"). Best-effort: errors only mean the daemon runs at idle cadence.
+  function notifyPanel(mode) {
+    if (ctlLink.running) return
+    ctlLink.command = [root.binPath, "panel", mode]
+    ctlLink.running = true
+  }
+
+  onOpenedChanged: root.notifyPanel(root.opened ? "open" : "close")
+  Component.onDestruction: {
+    if (root.opened) root.notifyPanel("close")
+  }
+
   function runCtl(action) {
     if (root.ctlBusy) return
     root.armedAction = ""
@@ -516,6 +532,46 @@ Panel {
             }
           }
 
+          // ---- Connection (public IP + approximate exit location) ----
+          Column {
+            width: parent.width
+            spacing: Style.space(4)
+            visible: root.hasData && s.geo
+
+            Text {
+              text: "CONNECTION"
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              font.bold: true
+            }
+
+            Repeater {
+              model: root.hasData && s.geo ? [
+                { label: "Public IP", value: String(s.geo.ip || "—") },
+                { label: "Exit location", value: Model.geoPlace(s.geo) || "—" },
+                { label: "Network", value: (s.geo.org ? String(s.geo.org) : "—")
+                  + (s.geo.asn ? "  (" + s.geo.asn + ")" : "") }
+              ] : []
+
+              KVRow {
+                required property var modelData
+                label: modelData.label
+                value: modelData.value
+              }
+            }
+
+            Text {
+              visible: root.hasData && s.geo
+              text: "where your traffic leaves the network (approximate)"
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
+          }
+
           // ---- Footer stats ----
           Column {
             width: parent.width
@@ -611,6 +667,18 @@ Panel {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.reloadHist()
+  }
+
+  Timer {
+    interval: 60000
+    running: root.opened
+    repeat: true
+    onTriggered: root.notifyPanel("open") // heartbeat: keep the fast lease
+  }
+
+  Process {
+    id: ctlLink
+    command: []
   }
 
   FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }

@@ -2,8 +2,9 @@
 // files described in CONTRACT.md: status.json, hist.json, daily.json and
 // events.jsonl. It also offers one-shot control subcommands.
 //
-//	starlinkd [-t host:port] [-interval 2s] [-map-interval 60s] [-once] [-v]
+//	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-once] [-v]
 //	starlinkd stow|unstow|reboot [-t host:port]
+//	starlinkd panel open|close
 package main
 
 import (
@@ -26,6 +27,8 @@ func main() {
 		switch os.Args[1] {
 		case "stow", "unstow", "reboot":
 			os.Exit(runControl(os.Args[1], os.Args[2:]))
+		case "panel":
+			os.Exit(runPanel(os.Args[2:]))
 		}
 	}
 	os.Exit(run(os.Args[1:]))
@@ -34,8 +37,10 @@ func main() {
 func run(args []string) int {
 	fs := flag.NewFlagSet("starlinkd", flag.ContinueOnError)
 	target := fs.String("t", "192.168.100.1:9200", "dish gRPC target host:port")
-	interval := fs.Duration("interval", 2*time.Second, "poll interval")
-	mapInterval := fs.Duration("map-interval", 60*time.Second, "obstruction map refresh interval")
+	interval := fs.Duration("interval", 2*time.Second, "poll interval while the dashboard is open")
+	idleInterval := fs.Duration("idle-interval", 10*time.Second, "poll interval while the dashboard is closed")
+	idleHistInterval := fs.Duration("idle-hist-interval", 60*time.Second, "background history refresh while the dashboard is closed")
+	mapInterval := fs.Duration("map-interval", 60*time.Second, "obstruction map refresh interval (dashboard open)")
 	once := fs.Bool("once", false, "run a single tick, write files, print status.json, exit")
 	verbose := fs.Bool("v", false, "log transitions and errors to stderr")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -45,6 +50,13 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Println("starlinkd " + version)
 		return 0
+	}
+	// Cadence sanity: idle must never be faster than active.
+	if *idleInterval < *interval {
+		*idleInterval = *interval
+	}
+	if *idleHistInterval < *idleInterval {
+		*idleHistInterval = *idleInterval
 	}
 
 	dir, err := stateDir()
@@ -61,17 +73,21 @@ func run(args []string) int {
 	defer conn.Close()
 
 	d := newDaemon(config{
-		target:      *target,
-		interval:    *interval,
-		mapInterval: *mapInterval,
-		once:        *once,
-		verbose:     *verbose,
-		dir:         dir,
+		target:                *target,
+		interval:              *interval,
+		idleInterval:          *idleInterval,
+		idleHistInterval:      *idleHistInterval,
+		mapInterval:           *mapInterval,
+		geoInterval:           5 * time.Minute,
+		geoTransitionInterval: 60 * time.Second,
+		once:                  *once,
+		verbose:               *verbose,
+		dir:                   dir,
 	}, api.NewDeviceClient(conn))
 	d.loadDaily()
 
 	if *once {
-		d.tick()
+		d.tick(true)
 		b, err := json.Marshal(d.lastFile)
 		if err != nil {
 			fmt.Fprintf(osStderr, "starlinkd: %v\n", err)
@@ -81,11 +97,28 @@ func run(args []string) int {
 		return 0
 	}
 
-	d.tick()
-	ticker := time.NewTicker(*interval)
-	defer ticker.Stop()
-	for range ticker.C {
-		d.tick()
+	if err := d.startControl(); err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: %v (panel wake-ups disabled)\n", err)
 	}
-	return 0
+
+	// First tick is active: dashboard data (incl. hist.json) lands immediately.
+	d.tick(true)
+	for {
+		tm := time.NewTimer(d.nextDelay())
+		select {
+		case <-tm.C:
+			d.tick(d.panelActive(time.Now()))
+		case cmd := <-d.ctrlCh:
+			if !tm.Stop() {
+				select {
+				case <-tm.C:
+				default:
+				}
+			}
+			d.applyControl(cmd, time.Now())
+			if cmd == "open" {
+				d.tick(true) // immediate refresh on dashboard open
+			}
+		}
+	}
 }

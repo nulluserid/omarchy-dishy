@@ -14,10 +14,31 @@ BarWidget {
   readonly property string glyph: "\udb86\udc80"  // nf-md-satellite_uplink
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/starlinkd"
 
-  // Parsed status.json (null = missing/corrupt) and 10s staleness flag.
+  // Parsed status.json (null = missing/corrupt) and 30s staleness flag.
   // (Not named `data`: that would shadow Item.data.)
   property var statusData: null
   property bool stale: true
+
+  // Auto-hide while away from Starlink (the local network claimed the dish's
+  // exact gRPC target, the LAN subnet, or its egress carrier). The daemon
+  // keeps checking at its own cadence and the widget returns by itself;
+  // `visible: false` collapses the ModuleSlot to zero width, keeping layout
+  // position. Setting: autoHide on/off.
+  readonly property bool autoHide: String(root.setting("autoHide", "on")) === "on"
+  readonly property bool offNetwork: Model.isOffNetwork(root.statusData)
+  visible: !root.autoHide || !root.offNetwork
+  onOffNetworkChanged: {
+    if (root.offNetwork) root.close() // dashboard never stays open when hidden
+  }
+
+  // Bar read cadence. While visible, the user's interval (default 2 s — the
+  // daemon refreshes status at the same rate with the dashboard open). While
+  // hidden the read slows to 10 s: it only has to catch the daemon flipping
+  // link.onStarlink back to true, so it costs almost nothing to return.
+  readonly property int readInterval: {
+    var n = Number(root.setting("interval", 2000))
+    return n > 0 ? n : 2000
+  }
 
   readonly property string level: Model.level(root.statusData)
   readonly property color stateColor: level === "good" ? Model.OK_HEX
@@ -73,7 +94,7 @@ BarWidget {
   onSettingsChanged: injectPanel()
 
   Timer {
-    interval: Number(root.setting("interval", 1000))
+    interval: root.visible ? root.readInterval : 10000
     running: true
     repeat: true
     triggeredOnStart: true
