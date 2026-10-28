@@ -3,7 +3,7 @@
   "id": "io.github.nulluserid.dishy",
   "name": "Dishy",
   "version": "1.1.1",
-  "author": "legend",
+  "author": "nulluserid",
   "description": "Starlink dish status in the bar with a live dashboard popup",
   "kinds": [
     "bar-widget"
