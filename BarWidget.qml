@@ -45,11 +45,34 @@ BarWidget {
     : level === "warn" ? Model.WARN_HEX
     : level === "bad" ? Color.urgent : Color.muted
 
+  // Typical-active hold: live.typicalDownMbps is null when the last minute
+  // had too few active samples (idle link). Hold the last value for five
+  // minutes so brief idle stretches don't blank the readout, then clear.
+  property var typicalHold: null
+  readonly property real typicalHoldS: 300
+
+  function noteTypical(parsed) {
+    var live = parsed && parsed.live ? parsed.live : null
+    var v = live ? live.typicalDownMbps : null
+    if (v !== null && v !== undefined) root.typicalHold = { v: v, ts: Date.now() / 1000 }
+  }
+
+  readonly property string typicalText: {
+    if (!root.typicalHold) return ""
+    if (Date.now() / 1000 - root.typicalHold.ts > root.typicalHoldS) return ""
+    return Model.fmtMbps(root.typicalHold.v)
+  }
+
   readonly property string value: {
     if (!root.statusData || root.stale) return ""
     var live = root.statusData.live || {}
     var show = String(root.setting("show", "latency"))
     if (show === "down") return Model.fmtMbps(live.downMbps)
+    if (show === "typical") {
+      // Prefer a fresh value; fall back to the hold window.
+      var fresh = live.typicalDownMbps !== null && live.typicalDownMbps !== undefined
+      return fresh ? Model.fmtMbps(live.typicalDownMbps) : root.typicalText
+    }
     if (show === "icon") return ""
     return Model.fmtMs(live.latencyMs)
   }
@@ -66,6 +89,36 @@ BarWidget {
     }
     root.statusData = parsed
     root.stale = Model.isStale(parsed, Date.now() / 1000)
+    root.noteTypical(parsed)
+    root.pushHostSetting()
+  }
+
+  // ---- dishHost setting → starlinkd ----
+  // The manifest's dishHost setting is pushed to the daemon: valid values
+  // that differ from the last-pushed one run `starlinkd set host`, which
+  // swaps the live target or (daemon not running) persists config.json for
+  // the next start. The daemon re-validates and rejects bad targets — a
+  // rejection is remembered (no retry loop) until the setting changes again.
+  readonly property string binPath: decodeURIComponent(
+    Qt.resolvedUrl("backend/bin/starlinkd").toString().replace(/^file:\/\//, ""))
+  property string appliedHost: ""
+  function pushHostSetting() {
+    var want = String(root.setting("dishHost", "192.168.100.1:9200")).trim()
+    if (want === root.appliedHost) return
+    if (!/^[A-Za-z0-9._\-\[\]]+(:[0-9]{1,5})?$/.test(want)) return // not (yet) valid; keep current target
+    hostSet.target = want
+    hostSet.command = [root.binPath, "set", "host", want]
+    hostSet.running = true
+  }
+
+  Process {
+    id: hostSet
+    property string target: ""
+    command: []
+    onExited: function(exitCode) {
+      // Even on rejection, stop retrying the same value; the next edit retries.
+      root.appliedHost = target
+    }
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false

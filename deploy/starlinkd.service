@@ -3,7 +3,7 @@ Description=Starlink dish status poller (starlinkd)
 After=network-online.target
 
 [Service]
-ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd -t 192.168.100.1:9200
+ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd
 Restart=on-failure
 RestartSec=5
 # notify-send needs the desktop session bus; omarchy exports it into the

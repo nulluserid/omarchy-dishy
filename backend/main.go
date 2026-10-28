@@ -5,6 +5,9 @@
 //	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-once] [-v]
 //	starlinkd stow|unstow|reboot [-t host:port]
 //	starlinkd panel open|close
+//	starlinkd set host <host[:port]>
+//
+// The dish target resolves as: -t flag > config.json > 192.168.100.1:9200.
 package main
 
 import (
@@ -29,6 +32,8 @@ func main() {
 			os.Exit(runControl(os.Args[1], os.Args[2:]))
 		case "panel":
 			os.Exit(runPanel(os.Args[2:]))
+		case "set":
+			os.Exit(runSetHost(os.Args[2:]))
 		}
 	}
 	os.Exit(run(os.Args[1:]))
@@ -65,6 +70,19 @@ func run(args []string) int {
 		return 1
 	}
 
+	// Target precedence: explicit -t > config.json (`set host`) > default.
+	tSet := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "t" {
+			tSet = true
+		}
+	})
+	if !tSet {
+		if cfgT, ok := loadTargetConfig(dir); ok {
+			*target = cfgT
+		}
+	}
+
 	conn, err := dial(*target)
 	if err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: dial %s: %v\n", *target, err)
@@ -84,7 +102,9 @@ func run(args []string) int {
 		verbose:               *verbose,
 		dir:                   dir,
 	}, api.NewDeviceClient(conn))
+	d.conn = conn
 	d.loadDaily()
+	d.initDay(time.Now())
 
 	if *once {
 		d.tick(true)

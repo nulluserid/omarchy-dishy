@@ -45,6 +45,44 @@ Panel {
     }
   }
 
+  // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
+  // The stamp re-binds at local midnight so the chart follows the day.
+  property var dayData: null
+  property string dayStamp: Qt.formatDateTime(new Date(), "yyyyMMdd")
+  function reloadDay() {
+    root.dayStamp = Qt.formatDateTime(new Date(), "yyyyMMdd")
+    try {
+      dayFile.reload()
+      root.dayData = Model.parse(dayFile.text())
+    } catch (e) {
+      root.dayData = null
+    }
+  }
+
+  // Today's typical-down series so far (minute-of-day order, null gaps).
+  readonly property var daySeries: {
+    if (!root.dayData || !root.dayData.minutes) return []
+    var now = new Date()
+    var cur = now.getHours() * 60 + now.getMinutes()
+    var m = root.dayData.minutes
+    var out = []
+    for (var i = 0; i <= cur && i < m.length; i++) {
+      var v = m[i] ? m[i].downTyp : null
+      out.push(v ? v : null)
+    }
+    return out
+  }
+
+  // Today's peak typical, for the section value line.
+  readonly property var dayPeak: {
+    var peak = null
+    var a = root.daySeries
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] !== null && (peak === null || a[i] > peak)) peak = a[i]
+    }
+    return peak
+  }
+
   // Dish controls (dial-on-demand CLI). Each button needs an inline
   // two-step confirm before anything is spawned; nothing auto-fires.
   property string armedAction: ""
@@ -183,7 +221,7 @@ Panel {
         Column {
           id: dashColumn
           width: dashScroll.width
-          spacing: Style.space(12)
+          spacing: Style.space(9)
 
           // ---- Header ----
           Row {
@@ -192,7 +230,7 @@ Panel {
 
             Rectangle {
               implicitWidth: stateRow.implicitWidth + Style.space(20)
-              implicitHeight: Style.space(44)
+              implicitHeight: Style.space(36)
               radius: Style.space(6)
               color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, 0.12)
               border.width: 1
@@ -228,7 +266,11 @@ Panel {
               spacing: Style.space(2)
 
               Text {
-                text: root.hasData ? "up " + Model.humanDur(s.dish ? s.dish.uptimeS : null) : ""
+                text: root.hasData
+                  ? "up " + Model.humanDur(s.dish ? s.dish.uptimeS : null)
+                    + "  ·  GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—") + " sats"
+                    + "  ·  eth " + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
+                  : ""
                 textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFamily
@@ -242,17 +284,6 @@ Panel {
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
                 width: Math.min(implicitWidth, parent.width)
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-
-              Text {
-                text: root.hasData
-                  ? "GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—") + " sats  ·  eth "
-                    + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
-                  : ""
-                textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -330,7 +361,7 @@ Panel {
             series: Model.decimate(h ? h.latencyMs : [], width)
             guides: root.latencyGuides
             autoScale: true
-            plotHeight: 90
+            plotHeight: 72
           }
 
           // ---- Throughput ----
@@ -362,6 +393,8 @@ Panel {
                   model: [
                     { label: "↓ down", color: String(Color.accent),
                       v: root.hasData && s.live ? s.live.downMbps : null },
+                    { label: "typ ↓", color: String(Color.accent),
+                      v: root.hasData && s.live ? s.live.typicalDownMbps : null },
                     { label: "↑ up", color: Model.WARN_HEX,
                       v: root.hasData && s.live ? s.live.upMbps : null }
                   ]
@@ -393,7 +426,7 @@ Panel {
 
             Item {
               width: parent.width
-              height: Style.space(70)
+              height: Style.space(60)
 
               Sparkline {
                 anchors.fill: parent
@@ -412,6 +445,17 @@ Panel {
             }
           }
 
+          // ---- Today (per-minute typical down, from day-*.json) ----
+          GraphSection {
+            title: "TODAY"
+            valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
+              ? Model.fmtMbps(s.live.typicalDownMbps)
+              : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
+            series: root.daySeries
+            autoScale: true
+            plotHeight: 56
+          }
+
           // ---- Power (Mini) ----
           GraphSection {
             visible: root.hasPower
@@ -419,7 +463,7 @@ Panel {
             valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
             series: Model.decimate(h ? h.powerW : [], width)
             autoScale: true
-            plotHeight: 50
+            plotHeight: 42
           }
 
           // ---- Drop strip ----
@@ -500,8 +544,8 @@ Panel {
               ObsMap {
                 id: obsMapPlot
                 anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(140)
-                height: Style.space(140)
+                width: Style.space(120)
+                height: Style.space(120)
                 snr: h && h.map ? h.map.snr : []
                 rows: h && h.map ? h.map.rows : 0
                 cols: h && h.map ? h.map.cols : 0
@@ -666,7 +710,10 @@ Panel {
     running: root.opened
     repeat: true
     triggeredOnStart: true
-    onTriggered: root.reloadHist()
+    onTriggered: {
+      root.reloadHist()
+      root.reloadDay()
+    }
   }
 
   Timer {
@@ -682,6 +729,7 @@ Panel {
   }
 
   FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }
+  FileView { id: dayFile; path: root.stateDir + "/day-" + root.dayStamp + ".json"; blockLoading: true }
 
   Process {
     id: ctl

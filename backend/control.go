@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +52,102 @@ func runControl(cmd string, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// ---- runtime dish target ----
+//
+// The target resolves as: explicit -t flag > config.json (written by
+// `starlinkd set host`) > built-in default. The default stays the dish's
+// link-local address; there is deliberately NO hostname fallback — DNS is
+// untrustworthy on VPNs and foreign networks, and a silent fallback could
+// aim dish gRPC at whatever answers a name.
+
+const configName = "config.json"
+
+type daemonConfig struct {
+	Target string `json:"target"`
+}
+
+// normalizeTarget validates a host[:port] target and appends the default
+// port when omitted. Rejects empties, whitespace, control characters, and
+// bad ports; caps length at the DNS limit.
+func normalizeTarget(t string) (string, error) {
+	t = strings.TrimSpace(t)
+	if t == "" {
+		return "", fmt.Errorf("empty target")
+	}
+	if len(t) > 253 {
+		return "", fmt.Errorf("target too long (%d)", len(t))
+	}
+	for _, r := range t {
+		if r <= ' ' || r == 0x7f {
+			return "", fmt.Errorf("invalid character in target")
+		}
+	}
+	host, port := t, "9200"
+	if i := strings.LastIndex(t, ":"); i >= 0 {
+		host, port = t[:i], t[i+1:]
+		if host == "" {
+			return "", fmt.Errorf("missing host before ':'")
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("bad port %q", port)
+	}
+	return host + ":" + port, nil
+}
+
+// loadTargetConfig reads the persisted target; missing/corrupt yields none.
+func loadTargetConfig(dir string) (string, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, configName))
+	if err != nil {
+		return "", false
+	}
+	var dc daemonConfig
+	if err := json.Unmarshal(b, &dc); err != nil {
+		return "", false
+	}
+	t, err := normalizeTarget(dc.Target)
+	if err != nil {
+		return "", false
+	}
+	return t, true
+}
+
+// writeTargetConfig persists the target (atomic) so the next daemon start
+// picks it up even when it is written while no daemon is running.
+func writeTargetConfig(dir, target string) error {
+	return atomicWrite(filepath.Join(dir, configName), marshalCompact(daemonConfig{Target: target}))
+}
+
+// setTarget switches the live daemon to a new dish target: validate, persist,
+// swap the connection. Runs only from the tick loop (applyControl), so the
+// swap is race-free with in-flight RPCs — fetches use d.client per call.
+func (d *daemon) setTarget(target string) error {
+	t, err := normalizeTarget(target)
+	if err != nil {
+		return err
+	}
+	if t == d.cfg.target {
+		return nil
+	}
+	nc, err := dial(t)
+	if err != nil {
+		return err
+	}
+	old := d.conn
+	d.conn = nc
+	d.client = api.NewDeviceClient(nc)
+	d.cfg.target = t
+	if err := writeTargetConfig(d.cfg.dir, t); err != nil {
+		d.vlog("write %s: %v", configName, err)
+	}
+	if old != nil {
+		old.Close()
+	}
+	d.vlog("target: %s", t)
+	return nil
 }
 
 // ---- panel control socket ----
@@ -116,22 +214,32 @@ func (d *daemon) startControl() error {
 func serveControlConn(c net.Conn, ch chan<- string) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(2 * time.Second))
-	b := make([]byte, 16)
+	b := make([]byte, 256)
 	n, err := c.Read(b)
 	if err != nil && !errors.Is(err, io.EOF) {
 		return
 	}
 	cmd := strings.TrimSpace(string(b[:n]))
-	switch cmd {
-	case "open", "close":
+	forward := ""
+	switch {
+	case cmd == "open" || cmd == "close":
+		forward = cmd
+	case strings.HasPrefix(cmd, "set host "):
+		if _, err := normalizeTarget(strings.TrimPrefix(cmd, "set host ")); err != nil {
+			_, _ = io.WriteString(c, "bad\n")
+			return
+		}
+		forward = cmd
+	}
+	if forward != "" {
 		select {
-		case ch <- cmd:
+		case ch <- forward:
 		default:
 		}
 		_, _ = io.WriteString(c, "ok\n")
-	default:
-		_, _ = io.WriteString(c, "bad\n")
+		return
 	}
+	_, _ = io.WriteString(c, "bad\n")
 }
 
 // runPanel is the client side of the control socket: `starlinkd panel
@@ -161,22 +269,69 @@ func runPanel(args []string) int {
 	return 0
 }
 
+// runSetHost is the client side of `starlinkd set host <host[:port]>`.
+// Prefers the live daemon's control socket (validates, persists, swaps the
+// connection); with no daemon listening, persists config.json directly so
+// the next start picks the target up.
+func runSetHost(args []string) int {
+	if len(args) != 2 || args[0] != "host" {
+		fmt.Fprintln(os.Stderr, "usage: starlinkd set host <host[:port]>")
+		return 2
+	}
+	t, err := normalizeTarget(args[1])
+	if err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: %v\n", err)
+		return 2
+	}
+	if path := controlSocketPath(); path != "" {
+		c, derr := net.DialTimeout("unix", path, 2*time.Second)
+		if derr == nil {
+			c.SetDeadline(time.Now().Add(2 * time.Second))
+			_, werr := io.WriteString(c, "set host "+t+"\n")
+			b := make([]byte, 8)
+			n, rerr := c.Read(b)
+			c.Close()
+			if werr == nil && rerr == nil && strings.TrimSpace(string(b[:n])) == "ok" {
+				return 0
+			}
+			fmt.Fprintln(osStderr, "starlinkd: set host rejected")
+			return 1
+		}
+		// No daemon listening: persist for the next start.
+	}
+	dir, err := stateDir()
+	if err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: state dir: %v\n", err)
+		return 1
+	}
+	if err := writeTargetConfig(dir, t); err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: %v\n", err)
+		return 1
+	}
+	fmt.Println("starlinkd: dish target set to " + t + " (used at next daemon start)")
+	return 0
+}
+
 // panelActive reports whether the dashboard-open lease is live (lease also
 // covers the one-shot probe burst; nextDelay distinguishes them).
 func (d *daemon) panelActive(now time.Time) bool {
 	return now.Before(d.panelUntil)
 }
 
-// applyControl handles one control-socket command ("open"/"close").
+// applyControl handles one control-socket command ("open"/"close"/"set host …").
 func (d *daemon) applyControl(cmd string, now time.Time) {
-	switch cmd {
-	case "open":
+	switch {
+	case cmd == "open":
 		d.panelUntil = now.Add(panelLease)
 		d.geoBump = true // fresh egress answer when the dashboard wants it
 		d.vlog("panel open: lease %s", panelLease)
-	case "close":
+	case cmd == "close":
 		d.panelUntil = time.Time{}
 		d.vlog("panel close")
+	case strings.HasPrefix(cmd, "set host "):
+		if err := d.setTarget(strings.TrimPrefix(cmd, "set host ")); err != nil {
+			d.vlog("set host: %v", err)
+		}
 	}
 }
 

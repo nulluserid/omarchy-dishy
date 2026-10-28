@@ -64,6 +64,7 @@ func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 		write("hist.json", hf)
 	}
 	write("daily.json", d.daily)
+	d.persistDay(now, d.cfg.once)
 	d.lastFile = sf
 }
 

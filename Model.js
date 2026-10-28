@@ -161,6 +161,8 @@ function summary(status) {
   if (live.latencyMs !== null && live.latencyMs !== undefined) parts.push(fmtMs(live.latencyMs))
   if (live.downMbps !== null && live.downMbps !== undefined)
     parts.push("↓" + fmtMbps(live.downMbps) + " ↑" + fmtMbps(live.upMbps))
+  if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
+    parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
   if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
   return parts.join("  ·  ")
 }

@@ -331,6 +331,7 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 	drop := h.GetPopPingDropRate()
 	hasPow := len(pow) == ringSize
 
+	real := false // at least one non-phantom sample consumed
 	var res ingestResult
 	// Oldest → newest so a phantom's carry source (the temporal predecessor)
 	// is always already written.
@@ -360,9 +361,19 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 			d.arrays[aPow][slot] = nil // powerIn absent on this hardware
 		}
 		d.arrays[aDrop][slot] = pf(float64(drop[slot]), 2)
+		real = true
 		if now.Add(-time.Duration(newest-g) * time.Second).After(d.startWall) {
 			res.downBytes += int64(down[slot] / 8)
 			res.upBytes += int64(up[slot] / 8)
+		}
+		// Day store: only identity-verified dish samples ever reach this
+		// loop (ingest runs inside goodTick), and the link gate keeps the
+		// contract's off-network freeze explicit — parked elsewhere writes
+		// no day history, same rule as daily.json's counters.
+		if d.link.OnStarlink {
+			wall := now.Add(-time.Duration(newest-g) * time.Second)
+			d.feedSample(wall, *d.arrays[aDown][slot], *d.arrays[aUp][slot],
+				d.arrays[aLat][slot], float64(drop[slot]), d.arrays[aPow][slot])
 		}
 	}
 	newestSlot := ((newest % ringSize) + ringSize) % ringSize
@@ -370,6 +381,9 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 		if p := d.arrays[aPow][newestSlot]; p != nil {
 			d.lastPowerW = *p // carried through phantoms, so never a fake 0
 		}
+	}
+	if real {
+		d.lastSampleWall = now // freshness anchor for typicalDownNow
 	}
 	res.samples = count
 	d.hasHist = true
@@ -504,6 +518,8 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 			DownMbps:  round(float64(s.GetDownlinkThroughputBps())/1e6, 2),
 			UpMbps:    round(float64(s.GetUplinkThroughputBps())/1e6, 2),
 			PowerW:    round(d.lastPowerW, 1),
+
+			TypicalDownMbps: typicalDownNow(&d.arrays, d.lastNewest, d.lastSampleWall, now),
 		},
 		Lat5m: lat5mStats{P50: p50, P95: p95, Mean: mean},
 		Drop15m: drop15Stats{
