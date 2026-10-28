@@ -91,20 +91,6 @@ BarWidget {
     }
     root.statusData = parsed
     root.stale = Model.isStale(parsed, Date.now() / 1000)
-    root.noteTypical(parsed)
-    root.pushHostSetting()
-  }
-
-  function tick() {
-    var parsed = null
-    try {
-      statusFile.reload()
-      parsed = Model.parse(statusFile.text())
-    } catch (e) {
-      parsed = null
-    }
-    root.statusData = parsed
-    root.stale = Model.isStale(parsed, Date.now() / 1000)
     root.nowS = Date.now() / 1000
     root.noteTypical(parsed)
     root.pushHostSetting()
@@ -159,9 +145,9 @@ BarWidget {
   }
 
   Component.onCompleted: {
-    // Seed the applied target from config.json so a CLI `set host` is not
-    // clobbered by the stored setting at every shell start; the setting only
-    // pushes when it actually differs.
+    // Seed the applied target from config.json: an unchanged setting is not
+    // re-pushed at every shell start; when it differs, the setting is the
+    // source of truth and pushes (manifest dishHost documents this).
     try {
       configFile.reload()
       var c = Model.parse(configFile.text())

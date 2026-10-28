@@ -40,7 +40,7 @@
         "key": "dishHost",
         "type": "string",
         "label": "Dish address (host[:port])",
-        "description": "gRPC target of the dish. Default is the dish's link-local address; a restart is not needed — the setting is pushed to starlinkd live. No DNS fallback by design (a VPN or foreign network must not redirect dish traffic).",
+        "description": "gRPC target of the dish. Default is the dish's link-local address; pushed to starlinkd live on change, no restart. This setting is the source of truth: if you change the target with `starlinkd set host` on the CLI, mirror it here or it will be pushed back. No DNS fallback by design (a VPN or foreign network must not redirect dish traffic).",
         "defaultValue": "192.168.100.1:9200"
       },
       {

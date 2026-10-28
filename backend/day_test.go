@@ -225,7 +225,7 @@ func TestTypicalDownNow(t *testing.T) {
 }
 
 // TestDayCompletedMinuteForcesWrite: a completed minute writes immediately
-// even inside the 30 s throttle window (CONTRACT.md day-store section).
+// even INSIDE the 30 s throttle window (CONTRACT.md day-store section).
 func TestDayCompletedMinuteForcesWrite(t *testing.T) {
 	d := mkDayDaemon(t)
 	start := time.Date(t0.Year(), t0.Month(), t0.Day(), 10, 0, 0, 0, t0.Location())
@@ -233,8 +233,11 @@ func TestDayCompletedMinuteForcesWrite(t *testing.T) {
 	feedAt(d, start, 10.0, pf32(20), 0)
 	d.persistDay(start.Add(1*time.Second), false) // writes, arms the throttle
 
-	feedAt(d, start.Add(60*time.Second), 10.0, pf32(20), 0) // completes minute 600
-	d.persistDay(start.Add(60*time.Second), false)          // rolled: forced despite throttle
+	// Complete minute 600 with the write clock only 2 s past the last write:
+	// without the forced write, the throttle would swallow this persist.
+	feedAt(d, start.Add(60*time.Second), 10.0, pf32(20), 0)
+	d.day.lastWrite = start.Add(58 * time.Second) // simulate a just-before write
+	d.persistDay(start.Add(60*time.Second), false)
 
 	b, err := os.ReadFile(filepath.Join(d.cfg.dir, dayFileName(d.day.file.Date)))
 	if err != nil {
