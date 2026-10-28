@@ -81,6 +81,14 @@ omarchy plugin remove io.github.nulluserid.dishy   # or delete the plugin direct
 rm -rf ~/.local/state/starlinkd                   # optional: usage/outage history
 ```
 
+## Marketplace
+
+Dishy's Omarchy plugin marketplace entry: [`io.github.nulluserid.dishy`](https://plugins.omarchy.org).
+A listing is pinned to a validated commit — not a tag: once listed, changes to this repo
+reach users via the marketplace's
+[verification flow](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/VERIFICATION.md).
+Keep `main` shippable and tag releases as usual.
+
 ## How it works
 
 Two small pieces with one tiny file contract:
