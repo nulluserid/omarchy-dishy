@@ -48,7 +48,9 @@ BarWidget {
   // Typical-active hold: live.typicalDownMbps is null when the last minute
   // had too few active samples (idle link). Hold the last value for five
   // minutes so brief idle stretches don't blank the readout, then clear.
+  // nowS is refreshed by tick() so the hold's expiry binding re-evaluates.
   property var typicalHold: null
+  property real nowS: 0
   readonly property real typicalHoldS: 300
 
   function noteTypical(parsed) {
@@ -59,7 +61,7 @@ BarWidget {
 
   readonly property string typicalText: {
     if (!root.typicalHold) return ""
-    if (Date.now() / 1000 - root.typicalHold.ts > root.typicalHoldS) return ""
+    if (root.nowS - root.typicalHold.ts > root.typicalHoldS) return ""
     return Model.fmtMbps(root.typicalHold.v)
   }
 
@@ -93,23 +95,58 @@ BarWidget {
     root.pushHostSetting()
   }
 
+  function tick() {
+    var parsed = null
+    try {
+      statusFile.reload()
+      parsed = Model.parse(statusFile.text())
+    } catch (e) {
+      parsed = null
+    }
+    root.statusData = parsed
+    root.stale = Model.isStale(parsed, Date.now() / 1000)
+    root.nowS = Date.now() / 1000
+    root.noteTypical(parsed)
+    root.pushHostSetting()
+  }
+
   // ---- dishHost setting → starlinkd ----
-  // The manifest's dishHost setting is pushed to the daemon: valid values
-  // that differ from the last-pushed one run `starlinkd set host`, which
-  // swaps the live target or (daemon not running) persists config.json for
-  // the next start. The daemon re-validates and rejects bad targets — a
-  // rejection is remembered (no retry loop) until the setting changes again.
+  // The manifest's dishHost setting is pushed to the daemon when it differs
+  // from the persisted config target (read once at start): a live `set host`
+  // swap if the daemon runs, else config.json for the next start. Edits are
+  // debounced (1.5 s stable) so typing prefixes never become live swaps, and
+  // the daemon re-validates — a rejected value is remembered (no retry loop)
+  // until the setting changes again.
   readonly property string binPath: decodeURIComponent(
     Qt.resolvedUrl("backend/bin/starlinkd").toString().replace(/^file:\/\//, ""))
   property string appliedHost: ""
+  property string pendingHost: ""
   function pushHostSetting() {
     var want = String(root.setting("dishHost", "192.168.100.1:9200")).trim()
-    if (want === root.appliedHost) return
+    if (want === root.appliedHost) {
+      hostDebounce.stop()
+      root.pendingHost = ""
+      return
+    }
     if (!/^[A-Za-z0-9._\-\[\]]+(:[0-9]{1,5})?$/.test(want)) return // not (yet) valid; keep current target
-    hostSet.target = want
-    hostSet.command = [root.binPath, "set", "host", want]
+    if (want === root.pendingHost && hostDebounce.running) return
+    root.pendingHost = want
+    hostDebounce.restart()
+  }
+
+  function pushHostNow(v) {
+    hostSet.target = v
+    hostSet.command = [root.binPath, "set", "host", v]
     hostSet.running = true
   }
+
+  Timer {
+    id: hostDebounce
+    interval: 1500
+    onTriggered: root.pushHostNow(root.pendingHost)
+  }
+
+  FileView { id: configFile; path: root.stateDir + "/config.json"; blockLoading: true }
 
   Process {
     id: hostSet
@@ -119,6 +156,17 @@ BarWidget {
       // Even on rejection, stop retrying the same value; the next edit retries.
       root.appliedHost = target
     }
+  }
+
+  Component.onCompleted: {
+    // Seed the applied target from config.json so a CLI `set host` is not
+    // clobbered by the stored setting at every shell start; the setting only
+    // pushes when it actually differs.
+    try {
+      configFile.reload()
+      var c = Model.parse(configFile.text())
+      if (c && c.target) root.appliedHost = String(c.target)
+    } catch (e) { }
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false

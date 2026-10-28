@@ -224,6 +224,34 @@ func TestTypicalDownNow(t *testing.T) {
 	}
 }
 
+// TestDayCompletedMinuteForcesWrite: a completed minute writes immediately
+// even inside the 30 s throttle window (CONTRACT.md day-store section).
+func TestDayCompletedMinuteForcesWrite(t *testing.T) {
+	d := mkDayDaemon(t)
+	start := time.Date(t0.Year(), t0.Month(), t0.Day(), 10, 0, 0, 0, t0.Location())
+
+	feedAt(d, start, 10.0, pf32(20), 0)
+	d.persistDay(start.Add(1*time.Second), false) // writes, arms the throttle
+
+	feedAt(d, start.Add(60*time.Second), 10.0, pf32(20), 0) // completes minute 600
+	d.persistDay(start.Add(60*time.Second), false)          // rolled: forced despite throttle
+
+	b, err := os.ReadFile(filepath.Join(d.cfg.dir, dayFileName(d.day.file.Date)))
+	if err != nil {
+		t.Fatalf("day file not written: %v", err)
+	}
+	var df dayFile
+	if err := json.Unmarshal(b, &df); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if df.Minutes[600].N != 1 {
+		t.Errorf("completed minute N = %d, want 1", df.Minutes[600].N)
+	}
+	if df.Minutes[601].N != 1 {
+		t.Errorf("open minute snapshot N = %d, want 1", df.Minutes[601].N)
+	}
+}
+
 // TestNormalizeTarget covers the `set host` acceptance rules.
 func TestNormalizeTarget(t *testing.T) {
 	ok := map[string]string{
@@ -238,7 +266,7 @@ func TestNormalizeTarget(t *testing.T) {
 			t.Errorf("normalizeTarget(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	bad := []string{"", "   ", ":9200", "h:", "h:0", "h:99999", "h:abc", "h x", "h\tx", string(make([]byte, 254))}
+	bad := []string{"", "   ", ":9200", "h:", "h:0", "h:99999", "h:abc", "h x", "h\tx", "::1", "dish:9200:extra", string(make([]byte, 254))}
 	for _, in := range bad {
 		if got, err := normalizeTarget(in); err == nil {
 			t.Errorf("normalizeTarget(%q) = %q, want error", in, got)

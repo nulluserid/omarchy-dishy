@@ -16,7 +16,8 @@ rolling), `live.typicalDownMbps` (typical ACTIVE throughput), and
 no DNS fallback — a VPN or foreign network must not redirect dish traffic).
 All additions are additive: v2 consumers work unchanged.
 
-The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/starlinkd/`:
+The daemon writes these files, all atomic (tmp+rename), dir
+`~/.local/state/starlinkd/`:
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
 (short probe burst) closed. (~1.5KB). Bar widget + panel read this.
@@ -156,8 +157,10 @@ identity-verified dish answers and only while `link.onStarlink`; parked
 elsewhere, nothing is ingested (GetStatus fails or does not answer as a
 dish), so nothing is written. Files older than 30 days are pruned by name.
 
-Known limitation: a backfill that crosses local midnight (≤15 min) has a tail
-belonging to the previous day's file; that tail is not backfilled into it.
+Known limitations: a backfill that crosses local midnight (≤15 min) has a
+tail belonging to the previous day's file; that tail is not backfilled into
+it. A restart inside a minute completes that bucket from post-restart
+samples only, so its `n` reflects the shorter window.
 
 ## events.jsonl — append on transitions; rotate >512KB → events.old.jsonl
 
@@ -200,11 +203,13 @@ route change still notifies. notify-send app-name: "Dishy".
 nonzero + stderr message on failure. Reboot = `reboot` request.
 
 `starlinkd set host <host[:port]>` (v3) — change the dish target. Validates
-(default port 9200 appended when omitted; no whitespace/control chars), then
-pushes to the running daemon via the control socket — live connection swap,
-config.json persisted. With no daemon listening, config.json is written
-directly and used at the next start. Target precedence everywhere:
-explicit `-t` flag > config.json > 192.168.100.1:9200. Deliberately no DNS
+(default port 9200 appended when omitted; no whitespace/control chars; bare
+IPv6 requires brackets), then pushes to the running daemon via the control
+socket — live connection swap, config.json persisted. With no daemon
+listening, config.json is written directly and used at the next start.
+Target precedence for the daemon and `set host`: explicit `-t` flag >
+config.json > 192.168.100.1:9200 (the one-shot `stow|unstow|reboot` controls
+resolve config.json > default when `-t` is absent). Deliberately no DNS
 fallback: a VPN or foreign network must not silently redirect dish traffic.
 
 ## Panel control socket (v2)

@@ -276,13 +276,13 @@ func (d *daemon) writeDay(now time.Time, force bool) {
 
 // persistDay is called from persist(): snapshot the in-progress minute into
 // the file (finalizeMinute recomputes the same bucket from the still-open
-// accumulators until the minute completes) and write when due. The 30 s
-// throttle bounds the cost; a completed minute forces an immediate write.
+// accumulators until the minute completes) and write when due. A completed
+// minute forces an immediate write; partial refreshes ride the 30 s throttle.
 func (d *daemon) persistDay(now time.Time, force bool) {
 	if d.day.minute >= 0 {
 		d.finalizeMinute(true)
 	}
-	d.writeDay(now, force)
+	d.writeDay(now, force || d.day.rolled)
 }
 
 // typicalDownNow computes the last-minute typical active downlink straight

@@ -22,17 +22,30 @@ import (
 // Exit 0 on success; nonzero + stderr message on failure.
 func runControl(cmd string, args []string) int {
 	fs := flag.NewFlagSet("starlinkd "+cmd, flag.ContinueOnError)
-	target := fs.String("t", "192.168.100.1:9200", "dish gRPC target host:port")
+	target := fs.String("t", "", "dish gRPC target host:port (default: config.json target or 192.168.100.1:9200)")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	t := *target
+	if t == "" {
+		// Same precedence as the daemon minus the (absent) flag: config then
+		// default, so customized targets work for one-shot controls too.
+		if dir, err := stateDir(); err == nil {
+			if cfgT, ok := loadTargetConfig(dir); ok {
+				t = cfgT
+			}
+		}
+	}
+	if t == "" {
+		t = "192.168.100.1:9200"
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := dial(*target)
+	conn, err := dial(t)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "starlinkd: dial %s: %v\n", *target, err)
+		fmt.Fprintf(os.Stderr, "starlinkd: dial %s: %v\n", t, err)
 		return 1
 	}
 	defer conn.Close()
@@ -90,6 +103,11 @@ func normalizeTarget(t string) (string, error) {
 		if host == "" {
 			return "", fmt.Errorf("missing host before ':'")
 		}
+	}
+	// A bare IPv6 literal ("::1") would split into garbage host/port —
+	// require bracketed form, matching the widget-side validation.
+	if strings.Contains(host, ":") && !(strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]")) {
+		return "", fmt.Errorf("bare IPv6 needs brackets: %q", host)
 	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
