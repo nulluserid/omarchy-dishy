@@ -3,7 +3,7 @@
   "id": "io.github.nulluserid.dishy",
   "name": "Dishy",
   "version": "1.1.1",
-  "author": "legend",
+  "author": "nulluserid",
   "description": "Starlink dish status in the bar with a live dashboard popup",
   "kinds": [
     "bar-widget"
@@ -20,7 +20,8 @@
     "defaults": {
       "show": "latency",
       "interval": 2000,
-      "autoHide": "on"
+      "autoHide": "on",
+      "dishHost": "192.168.100.1:9200"
     },
     "schema": [
       {
@@ -30,9 +31,17 @@
         "options": [
           "latency",
           "down",
+          "typical",
           "icon"
         ],
         "defaultValue": "latency"
+      },
+      {
+        "key": "dishHost",
+        "type": "string",
+        "label": "Dish address (host[:port])",
+        "description": "gRPC target of the dish. Default is the dish's link-local address; pushed to starlinkd live on change, no restart. This setting is the source of truth: if you change the target with `starlinkd set host` on the CLI, mirror it here or it will be pushed back. No DNS fallback by design (a VPN or foreign network must not redirect dish traffic).",
+        "defaultValue": "192.168.100.1:9200"
       },
       {
         "key": "autoHide",

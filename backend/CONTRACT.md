@@ -1,4 +1,4 @@
-# starlinkd ⇄ plugin contract (v2)
+# starlinkd ⇄ plugin contract (v3)
 
 Ground truth: live Starlink Mini, hw `mini1_panda_prod1`, fw `2026.09.08.mr86422`,
 API v43, gRPC `192.168.100.1:9200`, service `SpaceX.API.Device.Device/Handle`.
@@ -9,7 +9,15 @@ idle ticks, no hist writes), a `link` marker that hides the UI off-network, an
 `geo` egress lookup (public IP + exit city), and a `panel open|close` control
 socket. All additions are additive: consumers of the v1 fields work unchanged.
 
-The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/starlinkd/`:
+v3 (2026-10-27) amends v2: `day-YYYYMMDD.json` per-minute day history (30-day
+rolling), `live.typicalDownMbps` (typical ACTIVE throughput), and
+`starlinkd set host` — the dish target resolves as -t flag > config.json >
+192.168.100.1:9200 (the service unit no longer pins -t; there is deliberately
+no DNS fallback — a VPN or foreign network must not redirect dish traffic).
+All additions are additive: v2 consumers work unchanged.
+
+The daemon writes these files, all atomic (tmp+rename), dir
+`~/.local/state/starlinkd/`:
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
 (short probe burst) closed. (~1.5KB). Bar widget + panel read this.
@@ -23,7 +31,8 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
             "bootCount": 363, "uptimeS": 3310, "ethMbps": 1000 },
   "state": "ONLINE",
   "stateDetail": "",
-  "live": { "latencyMs": 18.0, "downMbps": 14.2, "upMbps": 1.2, "powerW": 13.0 },
+  "live": { "latencyMs": 18.0, "downMbps": 14.2, "upMbps": 1.2, "powerW": 13.0,
+            "typicalDownMbps": 11.4 },
   "lat5m": { "p50": 18.5, "p95": 24.0, "mean": 19.1 },
   "drop15m": { "ratio": 0.0021, "totalOutageS": 112, "count15m": 2 },
   "usage": { "downGB": 12.34, "upGB": 0.56, "allTimeDownGB": 812.4, "allTimeUpGB": 41.0 },
@@ -45,6 +54,12 @@ The daemon writes THREE files, all atomic (tmp+rename), dir `~/.local/state/star
 - `stateDetail`: `SOFTWARE_UPDATE_REBOOT_PENDING` | disablementCode when ≠ OKAY | `""`
 - `ts` staleness: consumers treat data older than 30s as NO_DATA (28s of
   headroom on the 10 s idle cadence; the bar timer runs at 10 s while hidden).
+- `live.typicalDownMbps` (v3): last minute's typical ACTIVE downlink — samples
+  ≥1 Mbps count as active, the fastest 10% of those are trimmed, and ≥4 active
+  samples are required; null when idle or stale (>60 s since the newest
+  sample). Same math as the day store (below), so the bar readout, panel
+  stat, and Today chart agree. The bar's `typical` readout holds the last
+  value for 5 minutes across brief idle stretches.
 - `ok:false`: gRPC failing; `error` carries the last message. `state: OFFLINE`.
 - `link` (v2): off-network UI marker. `onStarlink:false` ⇒ the machine is
   provably elsewhere: the QML bar widget hides (ModuleSlot → 0 width, layout
@@ -112,6 +127,41 @@ outages, send no notifications; a link flip off-network closes any open
 outage with a silent `outage_end` event (cause "(left network)"). A machine
 parked on another network does not pollute the dish's availability.
 
+## day-YYYYMMDD.json (v3) — per-minute day history, 30-day rolling
+
+One file per local day, atomic writes, throttled to one per 30 s (a completed
+minute forces a write; at most ~30 s of aggregates are lost to SIGKILL and
+the watermark heals the overlap on restart). `minutes` is indexed by
+minute-of-day, 0 = local midnight; a zero value = no data.
+
+```json
+{ "date": "2026-10-27", "lastTs": 1790000000,
+  "minutes": [ { }, { }, { "downTyp": 11.4, "ping": 18.6, "up": 1.2,
+                            "drop": 0.0008, "powerW": 13.4, "n": 60 } ] }
+```
+
+Per minute: `downTyp` — typical ACTIVE downlink, Mbps (samples ≥1 Mbps count
+as active; fastest 10% trimmed; ≥10 active samples for a completed minute,
+≥4 for the in-progress one), `ping` — median answered ping (ms), `up` — mean
+active up (Mbps), `drop` — mean drop rate over all real samples, `powerW` —
+mean input power, `n` — real samples (firmware phantoms excluded).
+
+`lastTs` is the aggregation watermark (wall unix of the newest aggregated
+sample): samples at or before it are skipped, so a restart's ring backfill
+never double-counts. Sample wall times are derived from the ingest cursor —
+the dish measures its ring even while this machine sleeps, so a wake's
+backfill attributes those seconds correctly.
+
+Off-network rule: identical to daily.json. The store is fed only from
+identity-verified dish answers and only while `link.onStarlink`; parked
+elsewhere, nothing is ingested (GetStatus fails or does not answer as a
+dish), so nothing is written. Files older than 30 days are pruned by name.
+
+Known limitations: a backfill that crosses local midnight (≤15 min) has a
+tail belonging to the previous day's file; that tail is not backfilled into
+it. A restart inside a minute completes that bucket from post-restart
+samples only, so its `n` reflects the shorter window.
+
 ## events.jsonl — append on transitions; rotate >512KB → events.old.jsonl
 
 ```json
@@ -152,13 +202,25 @@ route change still notifies. notify-send app-name: "Dishy".
 `starlinkd stow|unstow|reboot [-t 192.168.100.1:9200]` — exit 0 on success,
 nonzero + stderr message on failure. Reboot = `reboot` request.
 
+`starlinkd set host <host[:port]>` (v3) — change the dish target. Validates
+(default port 9200 appended when omitted; no whitespace/control chars; bare
+IPv6 requires brackets), then pushes to the running daemon via the control
+socket — live connection swap, config.json persisted. With no daemon
+listening, config.json is written directly and used at the next start.
+Target precedence for the daemon and `set host`: explicit `-t` flag >
+config.json > 192.168.100.1:9200 (the one-shot `stow|unstow|reboot` controls
+resolve config.json > default when `-t` is absent). Deliberately no DNS
+fallback: a VPN or foreign network must not silently redirect dish traffic.
+
 ## Panel control socket (v2)
 
 `starlinkd panel open|close` — one line (`open\n` / `close\n`) over a Unix
 socket at `$XDG_RUNTIME_DIR/starlinkd.sock` (0600, tmpfs; falls back to the
 state dir). The dashboard QML sends `open` on show (immediate refresh + a
 90 s fast-poll lease with a 60 s heartbeat) and `close` on hide (idle
-immediately). The daemon never blocks on it; failure to connect just means
+immediately). (v3) the widget settings also send `set host <target>` through
+the same socket; the listener validates the target and the tick loop applies
+it (connection swap + config persist). The daemon never blocks on it; failure to connect just means
 idle cadence. The lease covers a crashed shell: 90 s without a heartbeat and
 the daemon drops back to idle by itself — no permanent fast polling. A 30 s
 probe burst also runs once on the first failure after a good tick and on a

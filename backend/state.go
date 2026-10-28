@@ -4,6 +4,8 @@ import (
 	"net"
 	"time"
 
+	"google.golang.org/grpc"
+
 	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
@@ -69,6 +71,9 @@ type liveStats struct {
 	DownMbps  float64 `json:"downMbps"`
 	UpMbps    float64 `json:"upMbps"`
 	PowerW    float64 `json:"powerW"`
+	// TypicalDownMbps is the last minute's typical ACTIVE downlink (idle
+	// floor, fastest 10% trimmed) — null when too few active samples.
+	TypicalDownMbps *float64 `json:"typicalDownMbps,omitempty"`
 }
 
 type lat5mStats struct {
@@ -266,6 +271,14 @@ type daemon struct {
 	ctrlPath             string
 	ctrlCh               chan string
 
+	// Day history store (backend/day.go): per-minute aggregates over the
+	// sample stream, tick-loop-owned like everything else here.
+	day            dayAccum
+	lastSampleWall time.Time // wall clock of the newest ingested sample
+
+	// Runtime dish target. conn is the live gRPC connection (swapped by the
+	// `set host` control command); client always wraps conn.
+	conn       *grpc.ClientConn
 	lastStatus *dish.DishGetStatusResponse // last good status, for dish info on failures
 	lastObs    obsStats
 	lastFile   *statusFile // printed by -once
@@ -282,6 +295,7 @@ func newDaemon(cfg config, client api.DeviceClient) *daemon {
 		geoCh:      make(chan geoInfo, 1),
 		ctrlCh:     make(chan string, 4),
 	}
+	d.day.minute = -1 // no open bucket until the first sample
 	d.resetArrays()
 	return d
 }
