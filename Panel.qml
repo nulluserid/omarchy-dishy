@@ -491,7 +491,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(4)
-            visible: h && h.outages && h.outages.length > 0
+            visible: !!(h && h.outages && h.outages.length > 0)
 
             Text {
               text: "RECENT OUTAGES"
@@ -580,7 +580,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.space(4)
-            visible: root.hasData && s.geo
+            visible: !!(root.hasData && s.geo)
 
             Text {
               text: "CONNECTION"
@@ -607,7 +607,7 @@ Panel {
             }
 
             Text {
-              visible: root.hasData && s.geo
+              visible: !!(root.hasData && s.geo)
               text: "where your traffic leaves the network (approximate)"
               textFormat: Text.PlainText
               color: root.dim
