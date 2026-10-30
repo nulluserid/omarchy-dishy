@@ -1,4 +1,4 @@
-# starlinkd ⇄ plugin contract (v3)
+# starlinkd ⇄ plugin contract (v4)
 
 Ground truth: live Starlink Mini, hw `mini1_panda_prod1`, fw `2026.09.08.mr86422`,
 API v43, gRPC `192.168.100.1:9200`, service `SpaceX.API.Device.Device/Handle`.
@@ -16,8 +16,22 @@ rolling), `live.typicalDownMbps` (typical ACTIVE throughput), and
 no DNS fallback — a VPN or foreign network must not redirect dish traffic).
 All additions are additive: v2 consumers work unchanged.
 
+v4 (2026-10-30) amends v3: accumulated dish-derived state (daily.json,
+day-*.json) lives in per-dish partitions, `dishes/<dish-id>/` under the state
+dir, keyed by the identity-verified `device_info.id`. Joining another
+Starlink's network (same 192.168.100.1, different dish) switches to that
+dish's counters the moment it answers — and back, intact: usage, day history,
+and session availability never blend across dishes. config.json gains
+`lastDish` so restarts preload the right partition. Top-level daily.json /
+day-*.json from ≤ v3 installs are legacy (pre-partition, potentially
+mixed-dish) and are neither read nor migrated after the first identity is
+seen; they are safe to delete. status.json, hist.json, events.jsonl and
+config.json stay shared at the state root. New event type `dish_switch`
+{from,to}. All additions are additive: v3 consumers work unchanged.
+
 The daemon writes these files, all atomic (tmp+rename), dir
-`~/.local/state/starlinkd/`:
+`~/.local/state/starlinkd/` (v4: daily.json and day-*.json live per dish in
+`dishes/<dish-id>/` there):
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
 (short probe burst) closed. (~1.5KB). Bar widget + panel read this.
@@ -107,7 +121,8 @@ covering graph gaps across the idle stretch). Panel graphs read this.
 
 All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
 
-## daily.json — every tick. Persisted across restarts.
+## daily.json — every tick. Persisted across restarts. Dish-scoped (v4):
+## lives in `dishes/<dish-id>/` under the state dir, one per dish.
 
 ```json
 { "date": "2026-10-19", "downBytes": 1073741824, "upBytes": 52428800,
@@ -128,6 +143,7 @@ outage with a silent `outage_end` event (cause "(left network)"). A machine
 parked on another network does not pollute the dish's availability.
 
 ## day-YYYYMMDD.json (v3) — per-minute day history, 30-day rolling
+## (v4: dish-scoped — lives in `dishes/<dish-id>/` under the state dir)
 
 One file per local day, atomic writes, throttled to one per 30 s (a completed
 minute forces a write; at most ~30 s of aggregates are lost to SIGKILL and
@@ -172,7 +188,9 @@ samples only, so its `n` reflects the shorter window.
 {"ts":1760000300,"type":"state_change","from":"SEARCHING","to":"ONLINE"}
 ```
 Types: outage_start, outage_end, alert_set, alert_cleared, obstruction_heavy,
-state_change. `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
+state_change, dish_switch (v4: `{"type":"dish_switch","from":"<old dish id>",
+"to":"<new dish id>"}` — emitted when a different dish answers; event-only,
+never notified). `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
 60s; re-arm only after <0.005 for 300s.
 
 ## Notifications (notify-send, app-name "Dishy")
@@ -250,8 +268,11 @@ default-route change — one-shot, never while the failure persists.
 - `obstructionStats`: fractionObstructed, timeObstructed (s), validS, patchesValid.
 - `alerts` (DishAlerts): ~19 named booleans; emit every TRUE field.
   id = snake_case of proto name, label = Title Case.
-- softwareUpdateState ∈ IDLE | CHECKING | DOWNLOADING | WRITING | REBOOT_REQUIRED | DISABLED;
-  progressPct from softwareUpdateProgress (0..1).
+- softwareUpdateState ∈ IDLE | FETCHING | PRE_CHECK | WRITING | POST_CHECK |
+  REBOOT_REQUIRED | DISABLED | FAULTED (proto enum, "SOFTWARE_UPDATE_STATE_"
+  prefix trimmed);
+  progressPct from softwareUpdateProgress (0..1 fraction; multiply by 100
+  for display).
 - gpsStats: gpsValid, gpsSats.
 - status real JSON uses camelCase grpcurl names; Go struct fields are canonical.
 

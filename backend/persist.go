@@ -53,6 +53,8 @@ func marshalCompact(v any) []byte {
 // persist writes the contract files for one tick. Write failures are
 // logged, never fatal. hf == nil skips hist.json: idle ticks and failure
 // ticks carry no new history data (CONTRACT.md "hist.json — cadence").
+// status/hist describe the current dish for the UI (state root); daily.json
+// is dish-derived and lands in the dish's partition (CONTRACT.md v4).
 func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 	write := func(name string, v any) {
 		if err := atomicWrite(filepath.Join(d.cfg.dir, name), marshalCompact(v)); err != nil {
@@ -63,14 +65,23 @@ func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 	if hf != nil {
 		write("hist.json", hf)
 	}
-	write("daily.json", d.daily)
+	d.writeStat("daily.json", d.daily)
 	d.persistDay(now, d.cfg.once)
 	d.lastFile = sf
 }
 
-// loadDaily restores today's usage counters; missing/corrupt starts fresh.
+// writeStat writes into the current dish's partition (statDir), logging
+// failures like the shared-file writer.
+func (d *daemon) writeStat(name string, v any) {
+	if err := atomicWrite(filepath.Join(d.statDir(), name), marshalCompact(v)); err != nil {
+		d.vlog("write %s: %v", name, err)
+	}
+}
+
+// loadDaily restores the current dish's usage counters; missing/corrupt
+// starts fresh.
 func (d *daemon) loadDaily() {
-	b, err := os.ReadFile(filepath.Join(d.cfg.dir, "daily.json"))
+	b, err := os.ReadFile(filepath.Join(d.statDir(), "daily.json"))
 	if err != nil {
 		return
 	}

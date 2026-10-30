@@ -19,7 +19,11 @@ backend service. The bar widget shows live data within ~2 seconds.
 - **Bar:** satellite glyph + health dot (green online / amber searching or
   attention / red offline / gray no data) and live latency, down throughput,
   typical active throughput, or icon only (click the widget's settings).
-  Tooltip carries the full one-line summary.
+  Amber covers every attention-worthy dish alert (stuck motors, water,
+  slow ethernet, … — heating and power-save stay green), a pending
+  update reboot, and any disablement code; the tooltip lists all active
+  alerts plus the software-update state, so nothing the dish reports is
+  easy to miss.
 - **Auto-hide off-network (1.1):** when the machine is not on a Starlink
   network, the widget hides itself — the dish's exact gRPC target no longer
   answers *as a Starlink dish*, and your traffic provably exits through
@@ -43,6 +47,14 @@ backend service. The bar widget shows live data within ~2 seconds.
   - data used today/all-time, availability today/session
   - active dish alert chips and software-update state
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
+- **Multiple dishes (1.3):** stats are per dish. Move the machine between
+  Starlinks (or change the dish address) and each dish keeps its own usage,
+  availability, and day history in
+  `~/.local/state/starlinkd/dishes/<dish-id>/` — alternating between a
+  couple of dishes in a week never blends their numbers. A dish you have
+  not used before simply starts at zero. Old ≤ v1.2 top-level
+  `daily.json`/`day-*.json` files are legacy (and may mix dishes); they are
+  safe to delete.
 - **Notifications:** desktop notification when an outage starts and ends, when
   a dish alert sets, and on sustained heavy obstruction. Notifications fire on
   transitions; a dish that is already unreachable when the daemon starts stays
@@ -136,8 +148,10 @@ State lives in `~/.local/state/starlinkd/`: `status.json` (scalars +
 `link`/`geo`), `hist.json` (15-min time-ordered series + obstruction map,
 written only while the dashboard is open), `day-YYYYMMDD.json` (per-minute
 typical/ping/up/drop/power aggregates, 30-day rolling), `daily.json` (today +
-all-time usage/availability), `events.jsonl` (transition log). The full
-contract is documented in [`backend/CONTRACT.md`](backend/CONTRACT.md).
+all-time usage/availability), `events.jsonl` (transition log). Since v1.3 the
+usage/day-history files live per dish under `dishes/<dish-id>/` (see above).
+The full contract is documented in
+[`backend/CONTRACT.md`](backend/CONTRACT.md).
 
 Dish controls and the poller CLI: `backend/bin/starlinkd stow|unstow|reboot`;
 the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`.

@@ -276,6 +276,13 @@ type daemon struct {
 	day            dayAccum
 	lastSampleWall time.Time // wall clock of the newest ingested sample
 
+	// Per-dish state partition (backend/dish.go): dishID is the last
+	// identity-verified device id, dishDir the state subdirectory holding
+	// that dish's accumulated counters. Empty until the first good tick
+	// (statDir falls back to the state root).
+	dishID  string
+	dishDir string
+
 	// Runtime dish target. conn is the live gRPC connection (swapped by the
 	// `set host` control command); client always wraps conn.
 	conn       *grpc.ClientConn

@@ -77,8 +77,12 @@ func runControl(cmd string, args []string) int {
 
 const configName = "config.json"
 
+// daemonConfig is the persisted daemon configuration: the dish gRPC target
+// plus the last-seen dish identity (so a restart preloads the right per-dish
+// state partition even before that dish answers — CONTRACT.md v4).
 type daemonConfig struct {
-	Target string `json:"target"`
+	Target   string `json:"target"`
+	LastDish string `json:"lastDish,omitempty"`
 }
 
 // normalizeTarget validates a host[:port] target and appends the default
@@ -118,12 +122,8 @@ func normalizeTarget(t string) (string, error) {
 
 // loadTargetConfig reads the persisted target; missing/corrupt yields none.
 func loadTargetConfig(dir string) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(dir, configName))
-	if err != nil {
-		return "", false
-	}
-	var dc daemonConfig
-	if err := json.Unmarshal(b, &dc); err != nil {
+	dc, ok := loadDaemonConfig(dir)
+	if !ok {
 		return "", false
 	}
 	t, err := normalizeTarget(dc.Target)
@@ -133,10 +133,31 @@ func loadTargetConfig(dir string) (string, bool) {
 	return t, true
 }
 
-// writeTargetConfig persists the target (atomic) so the next daemon start
-// picks it up even when it is written while no daemon is running.
+// loadDaemonConfig reads the full persisted configuration.
+func loadDaemonConfig(dir string) (daemonConfig, bool) {
+	b, err := os.ReadFile(filepath.Join(dir, configName))
+	if err != nil {
+		return daemonConfig{}, false
+	}
+	var dc daemonConfig
+	if err := json.Unmarshal(b, &dc); err != nil {
+		return daemonConfig{}, false
+	}
+	return dc, true
+}
+
+// writeTargetConfig persists the target, preserving any recorded dish
+// identity (atomic) so the next daemon start picks both up even when the
+// write happens while no daemon is running.
 func writeTargetConfig(dir, target string) error {
-	return atomicWrite(filepath.Join(dir, configName), marshalCompact(daemonConfig{Target: target}))
+	dc, _ := loadDaemonConfig(dir)
+	dc.Target = target
+	return writeDaemonConfig(dir, dc)
+}
+
+// writeDaemonConfig persists the full configuration (atomic).
+func writeDaemonConfig(dir string, dc daemonConfig) error {
+	return atomicWrite(filepath.Join(dir, configName), marshalCompact(dc))
 }
 
 // setTarget switches the live daemon to a new dish target: validate, persist,
@@ -158,7 +179,7 @@ func (d *daemon) setTarget(target string) error {
 	d.conn = nc
 	d.client = api.NewDeviceClient(nc)
 	d.cfg.target = t
-	if err := writeTargetConfig(d.cfg.dir, t); err != nil {
+	if err := writeDaemonConfig(d.cfg.dir, daemonConfig{Target: t, LastDish: d.dishID}); err != nil {
 		d.vlog("write %s: %v", configName, err)
 	}
 	if old != nil {

@@ -103,8 +103,15 @@ func run(args []string) int {
 		dir:                   dir,
 	}, api.NewDeviceClient(conn))
 	d.conn = conn
-	d.loadDaily()
-	d.initDay(time.Now())
+	// Per-dish partitions: preload the last-seen dish's counters so restarts
+	// (and fail ticks while that dish is down) land in the right partition.
+	// With no identity on record, the legacy top-level files keep startup
+	// behavior until the first good tick switches to a partition.
+	d.adoptLastDish(time.Now())
+	if d.dishDir == "" {
+		d.loadDaily()
+		d.initDay(time.Now())
+	}
 
 	if *once {
 		d.tick(true)
