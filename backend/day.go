@@ -81,11 +81,12 @@ func (d *daemon) initDay(now time.Time) {
 	d.pruneDays(now)
 }
 
-// loadDay restores today's aggregates; a file dated other than today is
-// ignored for content (but still seen by pruneDays). Corrupt starts fresh.
+// loadDay restores the current dish's aggregates; a file dated other than
+// today is ignored for content (but still seen by pruneDays). Corrupt starts
+// fresh.
 func (d *daemon) loadDay(now time.Time) {
 	date := now.Format("2006-01-02")
-	b, err := os.ReadFile(filepath.Join(d.cfg.dir, dayFileName(date)))
+	b, err := os.ReadFile(filepath.Join(d.statDir(), dayFileName(date)))
 	if err != nil {
 		return
 	}
@@ -101,9 +102,10 @@ func dayFileName(date string) string {
 	return "day-" + strings.ReplaceAll(date, "-", "") + ".json"
 }
 
-// pruneDays removes day files older than the retention window.
+// pruneDays removes the current dish's day files outside the retention
+// window.
 func (d *daemon) pruneDays(now time.Time) {
-	entries, err := os.ReadDir(d.cfg.dir)
+	entries, err := os.ReadDir(d.statDir())
 	if err != nil {
 		return
 	}
@@ -119,7 +121,7 @@ func (d *daemon) pruneDays(now time.Time) {
 			continue
 		}
 		if date.Format("2006-01-02") < cutoff {
-			if err := os.Remove(filepath.Join(d.cfg.dir, name)); err != nil {
+			if err := os.Remove(filepath.Join(d.statDir(), name)); err != nil {
 				d.vlog("prune %s: %v", name, err)
 			}
 		}
@@ -269,7 +271,7 @@ func (d *daemon) writeDay(now time.Time, force bool) {
 	d.day.lastWrite = now
 	d.day.dirty = false
 	d.day.rolled = false
-	if err := atomicWrite(filepath.Join(d.cfg.dir, dayFileName(d.day.file.Date)), marshalCompact(d.day.file)); err != nil {
+	if err := atomicWrite(filepath.Join(d.statDir(), dayFileName(d.day.file.Date)), marshalCompact(d.day.file)); err != nil {
 		d.vlog("write %s: %v", dayFileName(d.day.file.Date), err)
 	}
 }

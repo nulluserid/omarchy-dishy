@@ -39,26 +39,44 @@ function isOffNetwork(status) {
   return !!link && link.onStarlink === false
 }
 
-function hasObstructionAlert(status) {
+// Every alert the dish currently reports, as labels — the full set, shown in
+// the tooltip so nothing the dish knows stays hidden from the user.
+function allAlertLabels(status) {
+  var out = []
   var alerts = status && status.alerts
-  if (!alerts || !alerts.length) return false
-  for (var i = 0; i < alerts.length; i++) {
+  if (alerts) for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
-    if (String(a.id || "").indexOf("obstruct") >= 0
-        || String(a.label || "").toLowerCase().indexOf("obstruct") >= 0) return true
+    var id = String(a.id || "")
+    out.push(a.label ? String(a.label) : titleCase(id))
   }
-  return false
+  return out
 }
 
-// good = ONLINE, warn = SEARCHING/BOOTING or obstruction alerts or
-// reboot-required detail, bad = NO_SIGNAL/THERMAL/OFFLINE, none = NO_DATA.
+// Alerts that deserve attention. is_heating (snow melt) and is_power_save_idle
+// (scheduled idle) are normal operation — they show in tooltip/panel but must
+// not turn the bar amber.
+function actionAlertLabels(status) {
+  var out = []
+  var alerts = status && status.alerts
+  if (alerts) for (var i = 0; i < alerts.length; i++) {
+    var a = alerts[i] || {}
+    var id = String(a.id || "")
+    if (id === "is_heating" || id === "is_power_save_idle") continue
+    out.push(a.label ? String(a.label) : titleCase(id))
+  }
+  return out
+}
+
+// good = ONLINE with no attention-worthy alert, warn = SEARCHING/BOOTING or
+// any action-worthy dish alert or reboot-required/disablement detail, bad =
+// NO_SIGNAL/THERMAL/OFFLINE, none = NO_DATA.
 function level(status) {
   if (!status) return "none"
   var st = String(status.state || "")
   var det = String(status.stateDetail || "")
   if (st === "ONLINE") {
-    if (hasObstructionAlert(status)) return "warn"
-    if (det.indexOf("REBOOT") >= 0) return "warn"
+    if (actionAlertLabels(status).length > 0) return "warn"
+    if (det !== "") return "warn" // reboot-required or a disablement code
     return "good"
   }
   if (st === "SEARCHING" || st === "BOOTING") return "warn"
@@ -151,7 +169,9 @@ function geoPlace(geo) {
   return out.length ? out.join(", ") : null
 }
 
-// One-line bar tooltip summary.
+// One-line bar tooltip summary: state + live numbers + every active alert
+// and the software-update state, so a glance at the tooltip never misses
+// what the dish is telling us.
 function summary(status) {
   if (!status) return "Starlink — waiting for starlinkd"
   var st = String(status.state || "NO_DATA")
@@ -164,5 +184,14 @@ function summary(status) {
   if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
     parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
   if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
+  var alerts = allAlertLabels(status)
+  for (var i = 0; i < alerts.length; i++) parts.push("⚠ " + alerts[i])
+  var det = String(status.stateDetail || "")
+  if (det !== "" && det.indexOf("REBOOT") < 0) parts.push(titleCase(det))
+  var u = status.update || {}
+  if (u.state === "REBOOT_REQUIRED") parts.push("update: reboot required")
+  else if (u.state === "FETCHING" || u.state === "WRITING")
+    parts.push("update: " + fmtPct(u.progressPct * 100, 0))
+  else if (u.state === "FAULTED") parts.push("update: faulted")
   return parts.join("  ·  ")
 }

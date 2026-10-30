@@ -334,8 +334,9 @@ Panel {
                 if (!root.hasData) return ""
                 var u = s.update || {}
                 if (u.state === "REBOOT_REQUIRED") return "Software update — reboot required"
-                if (u.state === "DOWNLOADING" || u.state === "WRITING")
-                  return "Software update — " + Model.fmtPct(u.progressPct, 0)
+                if (u.state === "FETCHING" || u.state === "WRITING")
+                  return "Software update — " + Model.fmtPct(u.progressPct * 100, 0)
+                if (u.state === "FAULTED") return "Software update — faulted"
                 var det = String(s.stateDetail || "")
                 if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
                   return Model.titleCase(det)

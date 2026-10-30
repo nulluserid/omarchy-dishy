@@ -107,6 +107,12 @@ func (d *daemon) postTick(now time.Time, ok bool) {
 }
 
 func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, fetchHist bool, dt time.Duration) {
+	// Dish identity: accumulated state is per dish. A different id than the
+	// loaded partition — including the first sighting after start — switches
+	// before anything books (CONTRACT.md v4).
+	if id := s.GetDeviceInfo().GetId(); id != "" && id != d.dishID {
+		d.switchDish(now, id)
+	}
 	state, detail := deriveState(s)
 	d.lastStatus = s
 	d.updateLink(now, true)

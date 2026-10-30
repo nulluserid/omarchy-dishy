@@ -49,12 +49,20 @@ BarWidget {
   // had too few active samples (idle link). Hold the last value for five
   // minutes so brief idle stretches don't blank the readout, then clear.
   // nowS is refreshed by tick() so the hold's expiry binding re-evaluates.
+  // The hold is per dish: a different dish id clears it immediately.
   property var typicalHold: null
+  property string holdDishID: ""
   property real nowS: 0
   readonly property real typicalHoldS: 300
 
   function noteTypical(parsed) {
-    var live = parsed && parsed.live ? parsed.live : null
+    if (!parsed) return // transient unreadable file: keep the current hold
+    var id = parsed.dish ? String(parsed.dish.id || "") : ""
+    if (id !== root.holdDishID) {
+      root.holdDishID = id
+      root.typicalHold = null
+    }
+    var live = parsed.live || null
     var v = live ? live.typicalDownMbps : null
     if (v !== null && v !== undefined) root.typicalHold = { v: v, ts: Date.now() / 1000 }
   }
@@ -221,8 +229,9 @@ BarWidget {
     }
   }
 
-  // Colored state dot: green ONLINE, amber SEARCHING/OBSTRUCTION/REBOOT,
-  // red NO_SIGNAL/THERMAL/OFFLINE/stale, gray NO_DATA.
+  // Colored state dot: green ONLINE with nothing needing attention, amber
+  // SEARCHING/BOOTING or any action-worthy dish alert or update/detail
+  // marker, red NO_SIGNAL/THERMAL/OFFLINE/stale, gray NO_DATA.
   Rectangle {
     id: stateDot
     visible: true

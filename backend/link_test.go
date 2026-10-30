@@ -89,7 +89,7 @@ func TestGoodTickIdleSkipsHistWrite(t *testing.T) {
 	if sf["ts"].(float64) != float64(t0.Unix()) {
 		t.Fatalf("status ts = %v", sf["ts"])
 	}
-	df := readJSON(t, dir, "daily.json")
+	df := readJSON(t, filepath.Join(dir, "dishes", "ut-test"), "daily.json")
 	if df["totalS"].(float64) != 10 {
 		t.Fatalf("daily.totalS = %v, want 10 (elapsed dt)", df["totalS"])
 	}
