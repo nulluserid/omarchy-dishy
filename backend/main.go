@@ -112,6 +112,9 @@ func run(args []string) int {
 		d.loadDaily()
 		d.initDay(time.Now())
 	}
+	// Retention sweep: drop dish partitions (and legacy root day files)
+	// idle past the window, before the first tick books anything.
+	d.tidyDishes(time.Now())
 
 	if *once {
 		d.tick(true)

@@ -121,6 +121,11 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// without stamping). The outage gate (failTick) treats this field as
 	// "a real dish answer postdates X".
 	d.link.LastDishOK = now.Unix()
+	// Retention evidence (CONTRACT.md): the sweep's "connected" marker.
+	// Fail ticks never reach this, so an adopted-but-never-reconnected
+	// partition ages out even though its daily.json keeps being written
+	// (pre-stamp files are seeded from mtime at load, freezing the stamp).
+	d.daily.LastSeen = now.Unix()
 
 	// History: delta-process the ring and refresh dish-reported outages.
 	histOK := false

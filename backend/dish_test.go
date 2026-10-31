@@ -240,6 +240,120 @@ func TestPruneDaysPartition(t *testing.T) {
 	}
 }
 
+func TestTidyDishes(t *testing.T) {
+	dir := t.TempDir()
+	d := newDaemon(config{dir: dir}, nil)
+	old := t0.AddDate(0, 0, -40)
+	oldDay := old.Format("20060102")
+
+	// mk builds a partition with a backdated daily.json and an optional
+	// day file dated `dayDate`.
+	mk := func(id string, mod time.Time, dayDate string) string {
+		p := filepath.Join(dir, "dishes", id)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(p, "daily.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if dayDate != "" {
+			if err := os.WriteFile(filepath.Join(p, "day-"+dayDate+".json"), []byte("{}"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Chtimes(filepath.Join(p, "daily.json"), mod, mod); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	mk("ut-stale", old, oldDay) // idle 40d, last day file 40d old → removed
+	mk("ut-mtdonly", old, "")   // drive-by: only an idle daily.json → removed
+	mk("ut-kept", t0, oldDay)   // fresh activity, stale day file → kept, day file pruned
+
+	// A fresh mtime does not keep a dish alive: fail ticks rewrite
+	// daily.json constantly, so mtime is not connection evidence — the
+	// lastSeen stamp is. 40d-old stamp → swept despite the fresh mtime.
+	staleFreshMtime := mk("ut-freshmtime", t0, oldDay)
+	if err := atomicWrite(filepath.Join(staleFreshMtime, "daily.json"),
+		marshalCompact(dailyFile{LastSeen: old.Unix()})); err != nil {
+		t.Fatal(err)
+	}
+	// Mirror: an old mtime with a fresh lastSeen stays (connected recently).
+	// The stamp write comes FIRST, then the mtime is backdated — the pin is
+	// genuinely "old mtime, fresh stamp" (a state only loadDaily's seed
+	// produces in production).
+	keptOldMtime := mk("ut-lastseen", old, "")
+	if err := atomicWrite(filepath.Join(keptOldMtime, "daily.json"),
+		marshalCompact(dailyFile{LastSeen: t0.Unix()})); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(filepath.Join(keptOldMtime, "daily.json"), old, old)
+
+	// Legacy root day files share the retention.
+	legacy := filepath.Join(dir, "day-"+oldDay+".json")
+	if err := os.WriteFile(legacy, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	freshRoot := filepath.Join(dir, "day-"+t0.Format("20060102")+".json")
+	if err := os.WriteFile(freshRoot, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.tidyDishes(t0)
+
+	for _, id := range []string{"ut-stale", "ut-mtdonly", "ut-freshmtime"} {
+		if _, err := os.Stat(filepath.Join(dir, "dishes", id)); !os.IsNotExist(err) {
+			t.Errorf("partition %s not swept", id)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dishes", "ut-kept")); err != nil {
+		t.Fatal("fresh partition removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dishes", "ut-kept", "day-"+oldDay+".json")); !os.IsNotExist(err) {
+		t.Error("kept partition's stale day file not pruned")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "dishes", "ut-lastseen")); err != nil {
+		t.Error("fresh-lastSeen partition removed despite old mtime")
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("legacy root day file not removed")
+	}
+	if _, err := os.Stat(freshRoot); err != nil {
+		t.Error("fresh root day file removed")
+	}
+}
+
+func TestTidySweepSelfHealsActivePartition(t *testing.T) {
+	// Sweeping the ADOPTED partition (idle past retention) must not break
+	// persistence: the next write recreates the directory and the
+	// reconnected dish resumes cleanly (CONTRACT.md v4 retention).
+	dir := t.TempDir()
+	d := newDaemon(config{dir: dir}, nil)
+	d.dishID = "ut-x"
+	d.dishDir = d.partitionDir("ut-x")
+	old := t0.AddDate(0, 0, -40)
+	if err := os.MkdirAll(d.dishDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.daily = dailyFile{DownBytes: 5, LastSeen: old.Unix()}
+	d.writeStat("daily.json", d.daily)
+	os.Chtimes(filepath.Join(d.dishDir, "daily.json"), old, old)
+
+	d.tidyDishes(t0)
+	if _, err := os.Stat(d.dishDir); !os.IsNotExist(err) {
+		t.Fatal("idle adopted partition not swept")
+	}
+
+	// The dish reconnects: the next good tick stamps and writes — the
+	// partition must come back (no ENOENT silently dropping writes).
+	d.daily.LastSeen = t0.Unix()
+	d.writeStat("daily.json", d.daily)
+	got := readJSON(t, d.dishDir, "daily.json")
+	if got["lastSeen"].(float64) != float64(t0.Unix()) || got["downBytes"].(float64) != 5 {
+		t.Fatalf("resurrected daily.json = %v", got)
+	}
+}
+
 func TestAdoptLastDish(t *testing.T) {
 	dir := t.TempDir()
 	// A previous run left config.json naming dish B, whose partition holds

@@ -194,13 +194,18 @@ type dailyAllTime struct {
 }
 
 type dailyFile struct {
-	Date      string       `json:"date"`
-	DownBytes int64        `json:"downBytes"`
-	UpBytes   int64        `json:"upBytes"`
-	OnlineS   int64        `json:"onlineS"`
-	TotalS    int64        `json:"totalS"`
-	Outages   int64        `json:"outages"`
-	AllTime   dailyAllTime `json:"allTime"`
+	Date      string `json:"date"`
+	DownBytes int64  `json:"downBytes"`
+	UpBytes   int64  `json:"upBytes"`
+	OnlineS   int64  `json:"onlineS"`
+	TotalS    int64  `json:"totalS"`
+	Outages   int64  `json:"outages"`
+	// LastSeen is the unix s of the last identity-verified good tick for
+	// this dish (goodTick only — fail ticks never refresh it). It is the
+	// retention-sweep evidence for "connected" (CONTRACT.md): file mtime
+	// moves on every write, connected or not, so it cannot say this.
+	LastSeen int64        `json:"lastSeen,omitempty"`
+	AllTime  dailyAllTime `json:"allTime"`
 }
 
 // ---- events.jsonl ----

@@ -29,6 +29,17 @@ seen; they are safe to delete. status.json, hist.json, events.jsonl and
 config.json stay shared at the state root. New event type `dish_switch`
 {from,to}. All additions are additive: v3 consumers work unchanged.
 
+Retention (2026-10-30): a dish partition with no connection activity for
+30 days is deleted whole (counters + day history) at the next startup or
+local day roll. Connection evidence is daily.json's `lastSeen` (written
+only by identity-verified good ticks) extended by the newest day-*.json
+date; when no stamp exists (≤ v1.4 files, drive-bys) file mtime is used,
+and `loadDaily` seeds the stamp from mtime so an adopted legacy dish ages
+out from load time even though later writes rewrite the file. Kept
+partitions roll their day files through the same 30-day window (see
+day-*.json), and legacy root-level day files share it. No configuration;
+the window is the day-history retention.
+
 The daemon writes these files, all atomic (tmp+rename), dir
 `~/.local/state/starlinkd/` (v4: daily.json and day-*.json live per dish in
 `dishes/<dish-id>/` there):
@@ -127,9 +138,14 @@ All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
 ```json
 { "date": "2026-10-19", "downBytes": 1073741824, "upBytes": 52428800,
   "onlineS": 86400, "totalS": 86420, "outages": 1,
+  "lastSeen": 1760000000,
   "allTime": { "downBytes": 8.72e11, "upBytes": 4.4e10 } }
 ```
-On date change: roll counters into `allTime`, zero today's.
+On date change: roll counters into `allTime`, zero today's. `lastSeen`
+(2026-10-30) is the unix s of the last identity-verified good tick for this
+dish — the retention sweep's "connected" evidence (fail ticks never refresh
+it, so an adopted-but-unreachable dish ages out despite its daily.json
+being rewritten).
 
 ### Off-network accounting (v2)
 

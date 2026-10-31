@@ -15,6 +15,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -143,4 +144,83 @@ func (d *daemon) switchDish(now time.Time, id string) {
 		d.vlog("write %s: %v", configName, err)
 	}
 	d.vlog("dish switch: %q -> %q (partition %s)", old, id, dishDirName(id))
+}
+
+// tidyDishes is the retention sweep: a dish partition with no connection
+// activity for dayKeep days is deleted whole — its counters and day history
+// (CONTRACT.md v4). "Connected" evidence is the newest of daily.json's
+// lastSeen stamp (written only by identity-verified good ticks, so fail
+// ticks cannot keep a dead dish fresh) and the newest day-*.json date;
+// partitions predating the stamp fall back to daily.json's mtime. The
+// ACTIVE partition is swept like any other: if it reconnects after a sweep,
+// writeStat/writeDay recreate the directory and counters resume — and its
+// in-memory counters keep the session alive meanwhile. Legacy root-level
+// day files from pre-partition installs share the same window; the
+// dishes/ directory itself is never touched. Runs at startup and on day
+// roll — housekeeping, vlog only, never fatal.
+func (d *daemon) tidyDishes(now time.Time) {
+	cutoff := now.AddDate(0, 0, -dayKeep)
+	root := filepath.Join(d.cfg.dir, dishesDirName)
+	entries, err := os.ReadDir(root)
+	if err == nil {
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			dir := filepath.Join(root, e.Name())
+			if last := partitionLastActivity(dir); last.Before(cutoff) {
+				if err := os.RemoveAll(dir); err != nil {
+					d.vlog("tidy %s: %v", e.Name(), err)
+				} else {
+					d.vlog("tidy: removed stale dish partition %s (idle since %s)",
+						e.Name(), last.Format("2006-01-02"))
+				}
+				continue
+			}
+			// Kept partition: still roll its day files through retention.
+			d.pruneDaysIn(dir, now)
+		}
+	}
+	// Legacy root day files (≤ v1.2 installs): same retention, and the
+	// pattern cannot match the dishes/ directory.
+	d.pruneDaysIn(d.cfg.dir, now)
+}
+
+// partitionLastActivity is the newest connection evidence in a dish
+// partition: daily.json's lastSeen stamp (good-tick only), the day after
+// the newest day file's date, or — for pre-stamp files — daily.json's
+// mtime, whichever is later.
+func partitionLastActivity(dir string) time.Time {
+	var last time.Time
+	haveStamp := false
+	if b, err := os.ReadFile(filepath.Join(dir, "daily.json")); err == nil {
+		var df dailyFile
+		if json.Unmarshal(b, &df) == nil && df.LastSeen > 0 {
+			last = time.Unix(df.LastSeen, 0)
+			haveStamp = true
+		}
+	}
+	if !haveStamp {
+		// Pre-stamp file or unreadable daily.json: mtime is the best
+		// remaining signal (pre-1.5 partitions and drive-bys).
+		if fi, err := os.Stat(filepath.Join(dir, "daily.json")); err == nil {
+			last = fi.ModTime()
+		}
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return last
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, "day-") || !strings.HasSuffix(name, ".json") || len(name) != len("day-20060102.json") {
+			continue
+		}
+		if date, err := time.Parse("20060102", name[len("day-"):len(name)-len(".json")]); err == nil {
+			if end := date.Add(24 * time.Hour); end.After(last) {
+				last = end
+			}
+		}
+	}
+	return last
 }
