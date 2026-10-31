@@ -1,6 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -382,6 +389,215 @@ func TestConsumeRefusesShortArraysDirectly(t *testing.T) {
 	}
 	if d.hasHist {
 		t.Error("hasHist set by refused consume")
+	}
+}
+
+func TestHostileNonFiniteFloats(t *testing.T) {
+	// Marketplace security review: a hostile endpoint answering as the dish
+	// can set any proto float32 to NaN/Inf. encoding/json refuses whole
+	// documents containing them, and marshalCompact used to degrade that
+	// into "{}" overwriting status.json/hist.json/day-*.json every tick.
+	// Three layers now: round() neutralizes, consume skips non-finite
+	// samples, and a marshal failure keeps the last good file.
+	dir := t.TempDir()
+	sent := 0
+	realSend := notifySend
+	notifySend = func(string, string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	c := mkStub()
+	c.status = onlineStatus()
+	c.status.PopPingLatencyMs = float32(math.Float32frombits(0x7FC00000)) // NaN
+	c.history = mkHist(899, []float32{20}, []float32{0})
+	c.history.PopPingLatencyMs[12] = float32(math.Float32frombits(0x7FC00000))
+	c.history.PowerIn[12] = float32(math.Float32frombits(0x7F800000)) // +Inf
+	d := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: time.Minute, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: dir,
+	}, c)
+	d.startWall = t0.Add(-time.Hour)
+
+	d.goodTick(t0, c.status, true, true, 2*time.Second) // active: hist.json is written
+
+	for _, name := range []string{"status.json", "hist.json"} {
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if string(b) == "{}" {
+			t.Fatalf("%s collapsed to {}: marshal failure replaced good state", name)
+		}
+		var probe map[string]any
+		if json.Unmarshal(b, &probe) != nil || len(probe) == 0 {
+			t.Fatalf("%s is not a full document: %s", name, b)
+		}
+	}
+	// The day file must be a full document too (NaN sample skipped, not fed).
+	dayB, err := os.ReadFile(filepath.Join(dir, "dishes", "ut-test", "day-"+t0.Format("20060102")+".json"))
+	if err != nil {
+		t.Fatalf("read day file: %v", err)
+	}
+	if strings.Contains(string(dayB), "NaN") {
+		t.Error("day file contains NaN")
+	}
+	_ = sent
+}
+
+func TestOutageAnnounceCooldown(t *testing.T) {
+	// A hostile endpoint rotating outage start_timestamp_ns per tick must
+	// not fork notify-send per tick: the reannounce cooldown bounds it.
+	dir := t.TempDir()
+	sent := 0
+	realSend := notifySend
+	notifySend = func(string, string) error { sent++; return nil }
+	defer func() { notifySend = realSend }()
+
+	c := mkStub()
+	c.status = onlineStatus()
+	d := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: time.Minute, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: dir,
+	}, c)
+	d.startWall = t0.Add(-time.Hour)
+
+	rotating := func(i int) {
+		c.history = mkHist(uint64(500+i), []float32{20}, []float32{0})
+		c.history.Outages = []*dish.DishOutage{{
+			Cause:            dish.DishOutage_BOOTING,
+			StartTimestampNs: int64(t0.Add(time.Duration(i)*time.Second).Unix()) * 1e9,
+			DurationNs:       1e9,
+		}}
+	}
+	for i := 0; i < 6; i++ {
+		rotating(i)
+		d.goodTick(t0.Add(time.Duration(i)*2*time.Second), c.status, false, true, 2*time.Second)
+	}
+	if sent > 4 {
+		t.Fatalf("rotating outage starts sent %d notifications in 12s, cooldown not enforced", sent)
+	}
+	// A real dish's static start still announces exactly once.
+	d2 := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: time.Minute, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: t.TempDir(),
+	}, mkStub())
+	d2.warm = true
+	sent = 0
+	fixed := []*dish.DishOutage{{
+		Cause:            dish.DishOutage_BOOTING,
+		StartTimestampNs: (t0.Unix() - 5) * 1e9,
+		DurationNs:       3e9,
+	}}
+	d2.observeDishOutages(fixed, t0, 4*time.Second)
+	d2.observeDishOutages(fixed, t0.Add(time.Second), 4*time.Second)
+	if sent != 1 {
+		t.Fatalf("fixed start announced %d times, want 1 (watermark)", sent)
+	}
+}
+
+func TestRotatingIDDebounce(t *testing.T) {
+	// A hostile endpoint rotating device ids per tick must not create a
+	// partition per tick: the debounce means a strictly rotating attacker
+	// creates none, and the LRU cap bounds slow churn.
+	dir := t.TempDir()
+	c := mkStub()
+	d := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: time.Minute, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: dir,
+	}, c)
+	d.startWall = t0.Add(-time.Hour)
+
+	for i := 0; i < 50; i++ {
+		c.status = statusWithID(fmt.Sprintf("fake-%02d", i))
+		c.history = mkHist(uint64(500+i), []float32{20}, []float32{0})
+		d.goodTick(t0.Add(time.Duration(i)*time.Second), c.status, false, true, 2*time.Second)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "dishes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) > 2 {
+		t.Fatalf("rotating ids created %d partitions, want <= 2 (initial adopt only)", len(entries))
+	}
+}
+
+func TestControlLineTruncation(t *testing.T) {
+	// The control socket must reject oversize/interminated lines instead of
+	// acting on a truncated prefix that normalizes to a different target.
+	for _, tc := range []struct {
+		name    string
+		line    string
+		wantBad bool
+	}{
+		{"normal length", "set host 192.168.100.1:9200\n", false},
+		{"long but legal target forwards whole", "set host " + strings.Repeat("a", 245) + ":9200\n", false},
+		{"max legal target still fits", "set host " + strings.Repeat("a", 253) + "\n", false},
+		{"oversize line rejected", "set host " + strings.Repeat("a", 600) + "\n", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := net.Pipe()
+			ch := make(chan string, 1)
+			go serveControlConn(server, ch)
+			client.SetDeadline(time.Now().Add(2 * time.Second))
+			go io.WriteString(client, tc.line)
+			// Single reader on the client end: the daemon's reply ("ok"/"bad").
+			buf := make([]byte, 16)
+			var reply string
+			for {
+				n, err := client.Read(buf)
+				reply += string(buf[:n])
+				if err != nil || strings.Contains(reply, "\n") {
+					break
+				}
+			}
+			<-time.After(50 * time.Millisecond)
+			got := ""
+			select {
+			case got = <-ch:
+			default:
+			}
+			if tc.wantBad {
+				if !strings.HasPrefix(reply, "bad") || got != "" {
+					t.Fatalf("oversize line: reply=%q forwarded=%q, want bad + no forward", reply, got)
+				}
+				return
+			}
+			if got != strings.TrimSuffix(tc.line, "\n") {
+				t.Fatalf("forwarded = %q, want %q", got, strings.TrimSuffix(tc.line, "\n"))
+			}
+			if !strings.HasPrefix(reply, "ok") {
+				t.Fatalf("reply = %q, want ok", reply)
+			}
+		})
+	}
+}
+
+func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
+	// The QML consumer loops rows*cols on the GUI thread: a map whose
+	// declared grid exceeds the delivered cells (or realistic dims) is
+	// rejected whole.
+	if m := toObsMap(&dish.DishGetObstructionMapResponse{
+		NumRows: 1000000, NumCols: 1000000, Snr: []float32{1},
+	}); m != nil {
+		t.Fatal("hostile 1e6 dims accepted")
+	}
+	if m := toObsMap(&dish.DishGetObstructionMapResponse{
+		NumRows: 4294967295, NumCols: 4294967295, Snr: []float32{1},
+	}); m != nil {
+		t.Fatal("uint32-max dims accepted")
+	}
+	if m := toObsMap(&dish.DishGetObstructionMapResponse{
+		NumRows: 4, NumCols: 4, Snr: []float32{1, 2, 3},
+	}); m != nil {
+		t.Fatal("rows*cols > len(snr) accepted")
+	}
+	if m := toObsMap(&dish.DishGetObstructionMapResponse{
+		NumRows: 4, NumCols: 4, Snr: make([]float32, 16),
+	}); m == nil {
+		t.Fatal("coherent map rejected")
 	}
 }
 

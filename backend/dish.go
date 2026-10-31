@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -132,13 +133,18 @@ func (d *daemon) switchDish(now time.Time, id string) {
 
 	d.dishID = id
 	d.dishDir = d.partitionDir(id)
-	if err := os.MkdirAll(d.dishDir, 0o755); err != nil {
+	if err := os.MkdirAll(d.dishDir, 0o700); err != nil {
 		d.vlog("partition %s: %v", dishDirName(id), err)
 	}
+	d.pendingID, d.pendingIDTicks = "", 0
+	d.lastOutageAnnounce = 0
 	d.daily = dailyFile{} // replaced by the partition's counters below
 	d.loadDaily()
 	d.day = dayAccum{minute: -1}
 	d.initDay(now)
+	// Cardinality bound: identity churn (hostile or unlucky) must not grow
+	// the partition set without limit. Debounced switches make this rare.
+	d.evictPartitions(now)
 
 	if err := writeDaemonConfig(d.cfg.dir, daemonConfig{Target: d.cfg.target, LastDish: id}); err != nil {
 		d.vlog("write %s: %v", configName, err)
@@ -184,6 +190,44 @@ func (d *daemon) tidyDishes(now time.Time) {
 	// Legacy root day files (≤ v1.2 installs): same retention, and the
 	// pattern cannot match the dishes/ directory.
 	d.pruneDaysIn(d.cfg.dir, now)
+}
+
+// evictPartitions bounds the partition set at maxDishPartitions: beyond it,
+// the least-recently-active partitions (never the active one) are removed.
+// Runs after switchDish creates a partition — debounced, so the ReadDir
+// cost is rare.
+func (d *daemon) evictPartitions(now time.Time) {
+	root := filepath.Join(d.cfg.dir, dishesDirName)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	type part struct {
+		name string
+		last time.Time
+	}
+	var parts []part
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		parts = append(parts, part{e.Name(), partitionLastActivity(dir)})
+	}
+	if len(parts) <= maxDishPartitions {
+		return
+	}
+	sort.Slice(parts, func(i, j int) bool { return parts[i].last.Before(parts[j].last) })
+	for _, p := range parts[:len(parts)-maxDishPartitions] {
+		if filepath.Join(root, p.name) == d.dishDir {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, p.name)); err != nil {
+			d.vlog("evict %s: %v", p.name, err)
+		} else {
+			d.vlog("evicted dish partition %s (cap %d)", p.name, maxDishPartitions)
+		}
+	}
 }
 
 // partitionLastActivity is the newest connection evidence in a dish

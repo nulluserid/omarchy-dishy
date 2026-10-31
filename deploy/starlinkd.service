@@ -3,6 +3,14 @@ Description=Starlink dish status poller (starlinkd)
 After=network-online.target
 
 [Service]
+# The daemon parses unauthenticated LAN wire data, so bound the blast radius
+# of any future parsing bug. It writes only under the user's home.
+# (Directives live in [Service] — systemd ignores them in [Unit].)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=256M
 ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd
 Restart=on-failure
 RestartSec=5

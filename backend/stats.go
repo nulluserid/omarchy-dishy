@@ -10,10 +10,19 @@ import (
 	udc "starlinkd/gen/spacex_api/satellites/network/ut_disablement_codes"
 )
 
-// round rounds v to n decimal places.
+// round rounds v to n decimal places. Non-finite values (NaN/Inf can enter
+// through hostile dish responses) become 0 so no marshaled document can
+// carry them — encoding/json refuses the whole document otherwise.
 func round(v float64, n int) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
 	p := math.Pow10(n)
-	return math.Round(v*p) / p
+	r := math.Round(v*p) / p
+	if math.IsNaN(r) || math.IsInf(r, 0) {
+		return 0
+	}
+	return r
 }
 
 // percentile returns the nearest-rank p-th percentile of an ascending slice.

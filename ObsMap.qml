@@ -30,6 +30,10 @@ Canvas {
     var ctx = getContext("2d")
     ctx.reset()
     if (width <= 0 || height <= 0 || rows <= 0 || cols <= 0 || !snr.length) return
+    // Defense in depth: rows/cols come from a daemon-parsed dish response.
+    // A hostile or incoherent grid (declared cells exceeding the delivered
+    // data, or absurd dims) must never drive this GUI-thread loop.
+    if (rows * cols > snr.length || rows > 1024 || cols > 1024) return
     var size = Math.min(width, height)
     var ox = (width - size) / 2
     var oy = (height - size) / 2

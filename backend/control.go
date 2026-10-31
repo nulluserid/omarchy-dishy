@@ -157,7 +157,11 @@ func writeTargetConfig(dir, target string) error {
 
 // writeDaemonConfig persists the full configuration (atomic).
 func writeDaemonConfig(dir string, dc daemonConfig) error {
-	return atomicWrite(filepath.Join(dir, configName), marshalCompact(dc))
+	b, err := marshalCompact(dc)
+	if err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(dir, configName), b)
 }
 
 // setTarget switches the live daemon to a new dish target: validate, persist,
@@ -253,8 +257,16 @@ func (d *daemon) startControl() error {
 func serveControlConn(c net.Conn, ch chan<- string) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(2 * time.Second))
-	b := make([]byte, 256)
+	// 512 covers every legal command ('set host ' + a 253-byte-cap target
+	// plus appended :9200). A full buffer means the line is oversize or
+	// unterminated: reject it rather than act on a truncated prefix that
+	// could normalize to a different valid target.
+	b := make([]byte, 512)
 	n, err := c.Read(b)
+	if n == len(b) {
+		_, _ = io.WriteString(c, "bad\n")
+		return
+	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		return
 	}

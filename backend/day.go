@@ -268,7 +268,8 @@ func (d *daemon) rollDay(now time.Time) {
 }
 
 // writeDay persists the aggregates (atomic, throttled). force skips the
-// throttle: minute rolls and -once runs always write.
+// throttle: minute rolls and -once runs always write. A marshal failure
+// keeps the data dirty so the next window retries it.
 func (d *daemon) writeDay(now time.Time, force bool) {
 	if !d.day.dirty {
 		return
@@ -276,13 +277,19 @@ func (d *daemon) writeDay(now time.Time, force bool) {
 	if !force && now.Sub(d.day.lastWrite) < dayWriteInterval {
 		return
 	}
+	d.ensureStatDir()
+	b, err := marshalCompact(d.day.file)
+	if err != nil {
+		d.vlog("marshal day %s: %v — keeping data for retry", d.day.file.Date, err)
+		return
+	}
+	if err := atomicWrite(filepath.Join(d.statDir(), dayFileName(d.day.file.Date)), b); err != nil {
+		d.vlog("write %s: %v", dayFileName(d.day.file.Date), err)
+		return
+	}
 	d.day.lastWrite = now
 	d.day.dirty = false
 	d.day.rolled = false
-	d.ensureStatDir()
-	if err := atomicWrite(filepath.Join(d.statDir(), dayFileName(d.day.file.Date)), marshalCompact(d.day.file)); err != nil {
-		d.vlog("write %s: %v", dayFileName(d.day.file.Date), err)
-	}
 }
 
 // persistDay is called from persist(): snapshot the in-progress minute into
