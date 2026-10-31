@@ -137,7 +137,15 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 		ingestGap := now.Sub(d.lastHist)
 		var h *api.Response
 		h = d.fetch(now, &api.Request{Request: &api.Request_GetHistory{GetHistory: &api.GetHistoryRequest{}}})
-		if hh := h.GetDishGetHistory(); hh != nil && len(hh.GetPopPingLatencyMs()) == ringSize {
+		// Every array consume() indexes must be the full ring: a short or
+		// hostile response (a LAN endpoint answering as the dish can send
+		// 900 latencies with an empty drop array) is rejected whole, never
+		// ingested — an index panic here would crash-loop the daemon.
+		if hh := h.GetDishGetHistory(); hh != nil &&
+			len(hh.GetPopPingLatencyMs()) == ringSize &&
+			len(hh.GetPopPingDropRate()) == ringSize &&
+			len(hh.GetDownlinkThroughputBps()) == ringSize &&
+			len(hh.GetUplinkThroughputBps()) == ringSize {
 			uptime, haveUp := uint64(0), false
 			if ds := s.GetDeviceState(); ds != nil {
 				uptime, haveUp = ds.GetUptimeS(), true
@@ -341,6 +349,13 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 	pow := h.GetPowerIn()
 	drop := h.GetPopPingDropRate()
 	hasPow := len(pow) == ringSize
+	// Defense in depth: goodTick rejects responses whose required arrays
+	// are not the full ring; consume never indexes past the end even if a
+	// future caller forgets (the slots below are bounded by ringSize).
+	if len(lat) != ringSize || len(drop) != ringSize || len(down) != ringSize || len(up) != ringSize {
+		d.vlog("history: short arrays, skipping ingest")
+		return ingestResult{}
+	}
 
 	real := false // at least one non-phantom sample consumed
 	var res ingestResult

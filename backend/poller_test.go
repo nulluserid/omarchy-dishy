@@ -322,6 +322,69 @@ func TestPhantomForwardFill(t *testing.T) {
 	}
 }
 
+func TestHostileHistoryShortArrays(t *testing.T) {
+	// Marketplace security review: goodTick used to validate only the
+	// latency array, so a hostile LAN endpoint answering as the dish could
+	// send 900 latencies with an empty/short drop array → index panic in
+	// consume → daemon crash loop. Every required array is now validated
+	// and a short response is rejected whole, never ingested.
+	cases := map[string]func(h *dish.DishGetHistoryResponse){
+		"nil drop":   func(h *dish.DishGetHistoryResponse) { h.PopPingDropRate = nil },
+		"short drop": func(h *dish.DishGetHistoryResponse) { h.PopPingDropRate = h.PopPingDropRate[:10] },
+		"short down": func(h *dish.DishGetHistoryResponse) { h.DownlinkThroughputBps = h.DownlinkThroughputBps[:899] },
+		"nil up":     func(h *dish.DishGetHistoryResponse) { h.UplinkThroughputBps = nil },
+		"only latencies": func(h *dish.DishGetHistoryResponse) {
+			h.PopPingDropRate = nil
+			h.DownlinkThroughputBps = nil
+			h.UplinkThroughputBps = nil
+			h.PowerIn = nil
+		},
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := mkStub()
+			c.history = mkHist(899, []float32{20}, []float32{0})
+			mutate(c.history)
+			d := newDaemon(config{
+				interval: 2 * time.Second, idleInterval: 10 * time.Second,
+				idleHistInterval: time.Minute, mapInterval: time.Minute,
+				geoInterval: time.Hour, geoTransitionInterval: time.Hour,
+				dir: t.TempDir(),
+			}, c)
+			d.startWall = t0.Add(-time.Hour)
+
+			d.goodTick(t0, c.status, false, true, 2*time.Second) // must not panic
+
+			if d.sampled {
+				t.Fatalf("%s: hostile history was ingested", name)
+			}
+			// The tick still publishes a healthy status (hist rejected, not
+			// the dish): ok true, ONLINE, no crash.
+			sf := readJSON(t, d.cfg.dir, "status.json")
+			if sf["ok"] != true || sf["state"] != "ONLINE" {
+				t.Fatalf("status degraded by rejected history: %v/%v", sf["ok"], sf["state"])
+			}
+		})
+	}
+}
+
+func TestConsumeRefusesShortArraysDirectly(t *testing.T) {
+	// Defense in depth: consume itself refuses arrays that are not the
+	// full ring, even if a future caller skips goodTick's validation.
+	c := mkStub()
+	c.history = mkHist(899, []float32{20}, []float32{0})
+	c.history.PopPingDropRate = c.history.PopPingDropRate[:1]
+	d := newDaemon(config{dir: t.TempDir()}, nil)
+	d.startWall = t0.Add(-time.Hour)
+	res := d.consume(c.history, 5, 899, t0)
+	if res.samples != 0 || res.downBytes != 0 {
+		t.Fatalf("short-array consume advanced: %+v", res)
+	}
+	if d.hasHist {
+		t.Error("hasHist set by refused consume")
+	}
+}
+
 func TestFailTickNotifyWarmGate(t *testing.T) {
 	// Cold start against an unreachable dish: no notification spam. After the
 	// first good tick (warm), a fresh outage notifies.
