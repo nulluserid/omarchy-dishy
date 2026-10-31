@@ -14,6 +14,9 @@ omarchy plugin add https://github.com/nulluserid/omarchy-dishy.git --enable
 Then run `./install.sh` once (from this directory) to install the `starlinkd`
 backend service. The bar widget shows live data within ~2 seconds.
 
+After a plugin update (`omarchy plugin update`), restart the shell once to
+pick up dashboard changes — the shell caches QML until restart.
+
 ## What it shows
 
 - **Bar:** satellite glyph + health dot (green online / amber searching or

@@ -22,7 +22,8 @@ On `main`:
 
 The binary is deterministic (`CGO_ENABLED=0 -trimpath -buildvcs=false`);
 verify a checkout with `go version -m backend/bin/starlinkd` and
-`backend/bin/starlinkd -version`.
+`backend/bin/starlinkd -version`. Restart the daemon if `backend/` or
+`deploy/starlinkd.service` changed.
 
 ## 3. Deploy locally
 
@@ -31,11 +32,12 @@ omarchy plugin update --yes
 ./install.sh        # restarts starlinkd (needed whenever backend/ changed)
 ```
 
-If `Panel.qml` / `BarWidget.qml` / `Model.js` changed, also restart the
-shell (`omarchy-restart-shell`): the plugin file watcher does **not**
-invalidate the QML engine cache for non-entrypoint files, so the new panel
-only appears after a shell restart. Verify against the live state files in
-`~/.local/state/starlinkd/`.
+If any file other than the entry point changed — `Panel.qml`, `Model.js`,
+`Sparkline.qml`, `ObsMap.qml` (everything except `BarWidget.qml`) — also
+restart the shell (`omarchy-restart-shell`): the plugin file watcher does
+**not** invalidate the QML engine cache for non-entrypoint files, so the
+new panel only appears after a shell restart. Verify against the live
+state files in `~/.local/state/starlinkd/`.
 
 ## 4. Marketplace update
 
