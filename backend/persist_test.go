@@ -107,7 +107,8 @@ func TestDailyRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	d := newDaemon(config{dir: dir}, nil)
 	d.daily = dailyFile{Date: "2026-10-19", DownBytes: 1234, UpBytes: 567,
-		AllTime: dailyAllTime{DownBytes: 872400000000}}
+		LastSeen: 1760000000,
+		AllTime:  dailyAllTime{DownBytes: 872400000000}}
 	if err := atomicWrite(filepath.Join(dir, "daily.json"), marshalCompact(d.daily)); err != nil {
 		t.Fatal(err)
 	}
@@ -115,6 +116,22 @@ func TestDailyRoundTrip(t *testing.T) {
 	d2.loadDaily()
 	if d2.daily != d.daily {
 		t.Errorf("round trip: %+v != %+v", d2.daily, d.daily)
+	}
+	// A pre-stamp file (≤ v1.4) is seeded from its mtime on load, freezing
+	// the retention stamp (CONTRACT.md retention).
+	seed := dailyFile{Date: "2026-10-19", DownBytes: 5}
+	if err := atomicWrite(filepath.Join(dir, "daily.json"), marshalCompact(seed)); err != nil {
+		t.Fatal(err)
+	}
+	mtime := t0
+	os.Chtimes(filepath.Join(dir, "daily.json"), mtime, mtime)
+	d4 := newDaemon(config{dir: dir}, nil)
+	d4.loadDaily()
+	if d4.daily.LastSeen != mtime.Unix() {
+		t.Errorf("stampless file not seeded: LastSeen = %d, want %d", d4.daily.LastSeen, mtime.Unix())
+	}
+	if d4.daily.DownBytes != 5 {
+		t.Errorf("seeded counters lost: %+v", d4.daily)
 	}
 	// Corrupt file: starts fresh without failing.
 	if err := os.WriteFile(filepath.Join(dir, "daily.json"), []byte("{oops"), 0o644); err != nil {

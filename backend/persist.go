@@ -71,15 +71,28 @@ func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 }
 
 // writeStat writes into the current dish's partition (statDir), logging
-// failures like the shared-file writer.
+// failures like the shared-file writer. The directory is ensured so a
+// partition deleted by the retention sweep self-heals on the dish's return
+// (CONTRACT.md v4 retention).
 func (d *daemon) writeStat(name string, v any) {
+	d.ensureStatDir()
 	if err := atomicWrite(filepath.Join(d.statDir(), name), marshalCompact(v)); err != nil {
 		d.vlog("write %s: %v", name, err)
 	}
 }
 
+// ensureStatDir creates the current dish's partition directory when missing.
+func (d *daemon) ensureStatDir() {
+	if d.dishDir != "" {
+		os.MkdirAll(d.dishDir, 0o755)
+	}
+}
+
 // loadDaily restores the current dish's usage counters; missing/corrupt
-// starts fresh.
+// starts fresh. A file without a retention stamp (≤ v1.4 partition, legacy
+// root file) is seeded from its mtime: the stamp then freezes and the
+// retention sweep ages the dish out from load time even though later writes
+// (including fail ticks) rewrite the file.
 func (d *daemon) loadDaily() {
 	b, err := os.ReadFile(filepath.Join(d.statDir(), "daily.json"))
 	if err != nil {
@@ -89,6 +102,11 @@ func (d *daemon) loadDaily() {
 	if err := json.Unmarshal(b, &df); err != nil {
 		d.vlog("daily.json: %v (starting fresh)", err)
 		return
+	}
+	if df.LastSeen == 0 {
+		if fi, err := os.Stat(filepath.Join(d.statDir(), "daily.json")); err == nil {
+			df.LastSeen = fi.ModTime().Unix()
+		}
 	}
 	d.daily = df
 }

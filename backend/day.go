@@ -105,14 +105,21 @@ func dayFileName(date string) string {
 // pruneDays removes the current dish's day files outside the retention
 // window.
 func (d *daemon) pruneDays(now time.Time) {
-	entries, err := os.ReadDir(d.statDir())
+	d.pruneDaysIn(d.statDir(), now)
+}
+
+// pruneDaysIn rolls the day files of one directory through the retention
+// window (the active partition via pruneDays; every kept partition and the
+// legacy root via tidyDishes).
+func (d *daemon) pruneDaysIn(dir string, now time.Time) {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	cutoff := now.AddDate(0, 0, -(dayKeep - 1)).Format("2006-01-02")
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(name, "day-") || !strings.HasSuffix(name, ".json") || len(name) != len("day-20060102.json") {
+		if e.IsDir() || !strings.HasPrefix(name, "day-") || !strings.HasSuffix(name, ".json") || len(name) != len("day-20060102.json") {
 			continue
 		}
 		raw := name[len("day-") : len(name)-len(".json")]
@@ -121,7 +128,7 @@ func (d *daemon) pruneDays(now time.Time) {
 			continue
 		}
 		if date.Format("2006-01-02") < cutoff {
-			if err := os.Remove(filepath.Join(d.statDir(), name)); err != nil {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil {
 				d.vlog("prune %s: %v", name, err)
 			}
 		}
@@ -257,6 +264,7 @@ func (d *daemon) rollDay(now time.Time) {
 	d.day.file = newDayFile(now.Format("2006-01-02"))
 	d.day.dirty = false
 	d.pruneDays(now)
+	d.tidyDishes(now) // day roll: also sweep unused dish partitions
 }
 
 // writeDay persists the aggregates (atomic, throttled). force skips the
@@ -271,6 +279,7 @@ func (d *daemon) writeDay(now time.Time, force bool) {
 	d.day.lastWrite = now
 	d.day.dirty = false
 	d.day.rolled = false
+	d.ensureStatDir()
 	if err := atomicWrite(filepath.Join(d.statDir(), dayFileName(d.day.file.Date)), marshalCompact(d.day.file)); err != nil {
 		d.vlog("write %s: %v", dayFileName(d.day.file.Date), err)
 	}

@@ -57,9 +57,12 @@ backend service. The bar widget shows live data within ~2 seconds.
   availability, and day history in
   `~/.local/state/starlinkd/dishes/<dish-id>/` — alternating between a
   couple of dishes in a week never blends their numbers. A dish you have
-  not used before simply starts at zero. Old ≤ v1.2 top-level
-  `daily.json`/`day-*.json` files are legacy (and may mix dishes); they are
-  safe to delete.
+  not used before simply starts at zero. Housekeeping (1.5): a partition
+  with no connection for 30 days is deleted whole at the next startup or
+  day roll, and every partition rolls its day files through the same
+  30-day retention as the active one. Old ≤ v1.2 top-level
+  `daily.json`/`day-*.json` files are legacy (and may mix dishes); they
+  share the 30-day retention and are safe to delete.
 - **Notifications:** desktop notification when an outage starts and ends, when
   a dish alert sets, and on sustained heavy obstruction. Notifications fire on
   transitions; a dish that is already unreachable when the daemon starts stays
