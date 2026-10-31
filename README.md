@@ -33,19 +33,24 @@ backend service. The bar widget shows live data within ~2 seconds.
   portals, or missing evidence the widget keeps showing for 10 minutes
   (grace) first. Turn it off with the widget's *Hide when not on Starlink*
   setting.
-- **Panel** (click the widget):
-  - state chip, dish uptime, hardware/software versions, GPS + ethernet link
-  - latency graph (15 min, 1 s resolution) with p50/p95 guides
-  - down/up throughput and power draw graphs, per-sample drop strip
-  - Today chart: per-minute typical active throughput, 30-day rolling history
-    (`~/.local/state/starlinkd/day-YYYYMMDD.json`)
-  - recent outages with cause and duration (dish-reported)
-  - public IP + approximate exit city/region and carrier — one ifconfig.co
-    lookup every few minutes, no API key — where your traffic leaves the
-    Starlink network
-  - obstruction view (the dish's sky-coverage map) + obstructed fraction
-  - data used today/all-time, availability today/session
-  - active dish alert chips and software-update state
+- **Bar placement (1.4):** Dishy sits in any bar section and moves like any
+  Omarchy widget — `omarchy bar move io.github.nulluserid.dishy --section
+  center` (or `right` / `left`); the dashboard follows the button.
+- **Panel** (click the widget; dense single-view grid, no scrolling):
+  - state chip, dish uptime + short id, hardware/software versions, GPS +
+    ethernet link
+  - latency graph (15 min, 1 s resolution, p50/p95 guides) beside
+    throughput (down fill / up line, typical-active readout) — drop strip
+    and 15-min drop stats under the latency plot
+  - Today chart (per-minute typical active throughput, 30-day rolling
+    history in `~/.local/state/starlinkd/dishes/<dish-id>/day-YYYYMMDD.json`)
+    beside power draw
+  - recent outages with cause and duration (dish-reported, latest three)
+  - obstruction view (sky-coverage map + stats) beside the egress lookup:
+    public IP + approximate exit city/region and carrier — one ifconfig.co
+    query every few minutes, no API key
+  - one-line usage grid: today / all-time / availability
+  - active dish alert chips + software-update state
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
 - **Multiple dishes (1.3):** stats are per dish. Move the machine between
   Starlinks (or change the dish address) and each dish keeps its own usage,
