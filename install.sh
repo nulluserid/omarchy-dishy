@@ -4,6 +4,14 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# The unit deliberately runs the marketplace checkout, not an arbitrary clone.
+# Refuse before changing any service/config if that is not what we checked.
+PLUGIN_DIR="$HOME/.config/omarchy/plugins/io.github.nulluserid.dishy"
+if [ ! -d "$PLUGIN_DIR" ] || [ "$(pwd -P)" != "$(cd "$PLUGIN_DIR" && pwd -P)" ]; then
+    echo "Run install.sh from $PLUGIN_DIR (install/update the Omarchy plugin first)." >&2
+    exit 1
+fi
+
 UNIT_DST="$HOME/.config/systemd/user/starlinkd.service"
 
 if [ ! -x backend/bin/starlinkd ]; then

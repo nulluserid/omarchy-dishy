@@ -20,7 +20,12 @@ func stateDir() (string, error) {
 		base = filepath.Join(home, ".local", "state")
 	}
 	dir := filepath.Join(base, "starlinkd")
-	return dir, os.MkdirAll(dir, 0o700)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	// MkdirAll leaves pre-upgrade permissions unchanged. Tighten the root
+	// boundary without recursively rewriting historical files.
+	return dir, os.Chmod(dir, 0o700)
 }
 
 // atomicWrite writes via tmp+rename so consumers never see partial files.
@@ -29,6 +34,11 @@ func atomicWrite(path string, data []byte) error {
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
+		return err
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		os.Remove(tmp)
 		return err
 	}
 	if _, err := f.Write(data); err != nil {
@@ -145,6 +155,10 @@ func (d *daemon) rollDaily(now time.Time) {
 // when the file exceeds 512KB.
 func appendEvent(dir string, ev event) error {
 	p := filepath.Join(dir, "events.jsonl")
+	// Tighten a legacy event file before it can become the rotated file.
+	if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if fi, err := os.Stat(p); err == nil && fi.Size() > maxEventBytes {
 		if err := os.Rename(p, filepath.Join(dir, "events.old.jsonl")); err != nil {
 			return fmt.Errorf("rotate: %w", err)
@@ -154,11 +168,14 @@ func appendEvent(dir string, ev event) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
 	_, err = f.Write(append(b, '\n'))
 	return err
 }

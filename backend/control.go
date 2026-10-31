@@ -97,7 +97,7 @@ func normalizeTarget(t string) (string, error) {
 		return "", fmt.Errorf("target too long (%d)", len(t))
 	}
 	for _, r := range t {
-		if r <= ' ' || r == 0x7f {
+		if r <= ' ' || r == 0x7f || strings.ContainsRune("/@?#%\\", r) {
 			return "", fmt.Errorf("invalid character in target")
 		}
 	}
