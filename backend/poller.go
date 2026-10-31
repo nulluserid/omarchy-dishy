@@ -106,12 +106,42 @@ func (d *daemon) postTick(now time.Time, ok bool) {
 	d.lastTickOK = ok
 }
 
+// publishPendingTick writes status.json (no hist/day writes) for a debounced
+// identity-switch candidate: nothing is booked, ingested, or transitioned
+// until the same id persists, so a hostile rotating id never touches
+// accumulated state.
+func (d *daemon) publishPendingTick(now time.Time, s *dish.DishGetStatusResponse) {
+	state, detail := deriveState(s)
+	d.warn("")
+	sf := d.buildStatus(now, s, state, detail)
+	d.persist(now, sf, nil)
+}
+
 func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, fetchHist bool, dt time.Duration) {
 	// Dish identity: accumulated state is per dish. A different id than the
 	// loaded partition — including the first sighting after start — switches
-	// before anything books (CONTRACT.md v4).
-	if id := s.GetDeviceInfo().GetId(); id != "" && id != d.dishID {
-		d.switchDish(now, id)
+	// before anything books (CONTRACT.md v4). A new id from a KNOWN dish must
+	// persist for dishSwitchDebounceTicks consecutive good ticks first: a
+	// hostile endpoint rotating ids per tick then never creates partitions.
+	if id := s.GetDeviceInfo().GetId(); id != "" {
+		switch {
+		case d.dishID == "":
+			d.switchDish(now, id) // first sighting adopts immediately
+		case id == d.dishID:
+			d.pendingID, d.pendingIDTicks = "", 0
+		case id == d.pendingID:
+			d.pendingIDTicks++
+			if d.pendingIDTicks >= dishSwitchDebounceTicks {
+				d.switchDish(now, id)
+			} else {
+				d.publishPendingTick(now, s)
+				return
+			}
+		default:
+			d.pendingID, d.pendingIDTicks = id, 1
+			d.publishPendingTick(now, s)
+			return
+		}
 	}
 	state, detail := deriveState(s)
 	d.lastStatus = s
@@ -137,7 +167,15 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 		ingestGap := now.Sub(d.lastHist)
 		var h *api.Response
 		h = d.fetch(now, &api.Request{Request: &api.Request_GetHistory{GetHistory: &api.GetHistoryRequest{}}})
-		if hh := h.GetDishGetHistory(); hh != nil && len(hh.GetPopPingLatencyMs()) == ringSize {
+		// Every array consume() indexes must be the full ring: a short or
+		// hostile response (a LAN endpoint answering as the dish can send
+		// 900 latencies with an empty drop array) is rejected whole, never
+		// ingested — an index panic here would crash-loop the daemon.
+		if hh := h.GetDishGetHistory(); hh != nil &&
+			len(hh.GetPopPingLatencyMs()) == ringSize &&
+			len(hh.GetPopPingDropRate()) == ringSize &&
+			len(hh.GetDownlinkThroughputBps()) == ringSize &&
+			len(hh.GetUplinkThroughputBps()) == ringSize {
 			uptime, haveUp := uint64(0), false
 			if ds := s.GetDeviceState(); ds != nil {
 				uptime, haveUp = ds.GetUptimeS(), true
@@ -307,6 +345,11 @@ func (d *daemon) ingest(h *dish.DishGetHistoryResponse, uptime uint64, haveUptim
 	default: // normal ring wrap
 		count = ringSize - int(d.prevCur) + int(cur)
 	}
+	if count < 0 {
+		// A hostile `current` can wrap the uint64 delta past int: treat it
+		// as too-far-behind and re-read the whole ring instead of skipping.
+		count = ringSize
+	}
 	if count > ringSize {
 		count = ringSize // too far behind: re-read the whole ring
 	}
@@ -341,6 +384,17 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 	pow := h.GetPowerIn()
 	drop := h.GetPopPingDropRate()
 	hasPow := len(pow) == ringSize
+	// Defense in depth: goodTick rejects responses whose required arrays
+	// are not the full ring; consume never indexes past the end even if a
+	// future caller forgets (the slots below are bounded by ringSize).
+	if len(lat) != ringSize || len(drop) != ringSize || len(down) != ringSize || len(up) != ringSize {
+		d.vlog("history: short arrays, skipping ingest")
+		return ingestResult{}
+	}
+	// A hostile response can carry NaN/Inf float32s: they would poison the
+	// ring, the day aggregates and every marshaled document (encoding/json
+	// refuses non-finite floats). Skip such samples entirely.
+	nonFinite := func(v float32) bool { return math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) }
 
 	real := false // at least one non-phantom sample consumed
 	var res ingestResult
@@ -349,6 +403,10 @@ func (d *daemon) consume(h *dish.DishGetHistoryResponse, count, newest int, now 
 	for i := count - 1; i >= 0; i-- {
 		g := newest - i
 		slot := ((g % ringSize) + ringSize) % ringSize
+		if nonFinite(lat[slot]) || nonFinite(down[slot]) || nonFinite(up[slot]) ||
+			nonFinite(drop[slot]) || (hasPow && nonFinite(pow[slot])) {
+			continue // hostile non-finite sample: never stored or aggregated
+		}
 		phantom := drop[slot] < 1 && lat[slot] == 0
 		if phantom {
 			prev := ((g-1)%ringSize + ringSize) % ringSize
@@ -428,19 +486,37 @@ func toOutages(list []*dish.DishOutage) []outage {
 // parked away, outages that started (and likely ended) long ago are recorded
 // silently instead of announced as new.
 func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time, gap time.Duration) {
+	const maxOutageEntries = 100
+	if len(list) > maxOutageEntries {
+		list = list[:maxOutageEntries] // hostile lists are bounded, not unbounded work
+	}
 	window := int64(gap.Seconds()) + 2
 	if window > int64(maxOutageAnnounceWindow.Seconds()) {
 		window = int64(maxOutageAnnounceWindow.Seconds())
 	}
 	for _, o := range list {
 		start := o.GetStartTimestampNs() / 1e9
+		// Future-dated starts can never announce and must not advance the
+		// watermark (a single far-future start would poison it forever).
+		nowS := now.Unix()
+		if nowS-start < 0 {
+			continue
+		}
 		if start <= d.maxDishOutageStart {
 			continue
 		}
-		fresh := gap > 0 && now.Unix()-start <= window
+		// The watermark is attacker-advanceable, so it alone cannot gate
+		// announcements: reject starts outside the freshness window and
+		// rate-limit announcements so a rotating-start flapper cannot fork
+		// notify-send per tick.
+		fresh := gap > 0 && nowS-start <= window
+		if fresh && nowS-d.lastOutageAnnounce < outageReannounceS {
+			fresh = false
+		}
 		d.maxDishOutageStart = start
 		if fresh && d.openOutage == nil && d.warm {
 			cause := o.GetCause().String()
+			d.lastOutageAnnounce = nowS
 			d.openOutage = &outageTrack{cause: cause, start: start}
 			d.daily.Outages++
 			d.emit(event{Type: "outage_start", Cause: cause},
@@ -644,6 +720,13 @@ func (d *daemon) buildHist(now time.Time) *histFile {
 
 func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
 	if m == nil {
+		return nil
+	}
+	rows, cols := int(m.GetNumRows()), int(m.GetNumCols())
+	// A hostile response can declare absurd or incoherent grids; the QML
+	// consumer loops rows*cols on the GUI thread (ObsMap.qml), so a map
+	// that cannot be rendered from the delivered cells is rejected whole.
+	if rows < 1 || cols < 1 || rows > 2048 || cols > 2048 || rows*cols > len(m.GetSnr()) {
 		return nil
 	}
 	snr := make([]float64, len(m.GetSnr()))

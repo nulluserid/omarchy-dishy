@@ -271,6 +271,25 @@ default-route change — one-shot, never while the failure persists.
 - `-once`: single tick, write files, print status.json to stdout, exit.
 - `-v`: log transitions + errors to stderr (journald under systemd).
 
+## Security hardening (2026-10-31)
+
+Response-trust hardening for the unauthenticated dish channel: GetHistory is
+ingested only when **all four** ring arrays are exactly ringSize (short or
+hostile responses are rejected whole); non-finite (NaN/Inf) samples are
+skipped and `round()` neutralizes non-finite floats so no state file can
+carry them (a marshal failure now keeps the last good file instead of writing
+an empty object); obstruction maps are rejected unless 1 ≤ rows,cols ≤ 2048
+and rows·cols ≤ len(snr) (ObsMap.qml additionally refuses incoherent grids);
+dish-reported outage starts are accepted only within the freshness window
+(never future-dated) and announcements are rate-limited to one per 60 s;
+dish-identity switches are debounced to 2 consecutive identical answers
+(first sighting adopts immediately) and the partition set is capped at 64
+with least-recently-active eviction; the control socket reads a 512-byte
+line and rejects oversize commands; state files are mode 0600 and state
+directories 0700; history-array values outside int range clamp to a full
+ring re-read; the systemd user unit sets NoNewPrivileges/ProtectSystem/
+PrivateTmp/RestrictAddressFamilies/MemoryMax.
+
 ## Field mapping ground truth (from testdata)
 
 - History cursor `current` (uint64): index of newest sample; ring of 900.

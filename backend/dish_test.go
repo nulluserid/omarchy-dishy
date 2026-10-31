@@ -6,6 +6,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -73,10 +74,18 @@ func TestDishSwitchPartitionsKeepStats(t *testing.T) {
 		t.Fatal("good ticks wrote daily.json outside the dish partition")
 	}
 
-	// Switch to dish B: a fresh partition, fresh session.
+	// Switch to dish B: first sighting only pends (status published, no
+	// partition, nothing booked); the second consecutive sighting switches.
 	c.status = statusWithID("ut-bbb")
 	c.history = mkHist(500, []float32{30}, []float32{0})
 	d.goodTick(t0.Add(4*time.Second), c.status, false, true, 2*time.Second)
+	if _, err := os.Stat(filepath.Join(dir, "dishes", "ut-bbb")); !os.IsNotExist(err) {
+		t.Fatal("pending sighting created the partition early")
+	}
+	if dfa["totalS"].(float64) != 4 {
+		t.Fatalf("pending tick booked into dish A: %v", dfa)
+	}
+	d.goodTick(t0.Add(6*time.Second), c.status, false, true, 2*time.Second)
 	partB := filepath.Join(dir, "dishes", "ut-bbb")
 	dfb := readJSON(t, partB, "daily.json")
 	if dfb["totalS"].(float64) != 2 {
@@ -100,14 +109,17 @@ func TestDishSwitchPartitionsKeepStats(t *testing.T) {
 		t.Fatalf("config lastDish = %v, want ut-bbb", cfg["lastDish"])
 	}
 
-	// Switch back to dish A: its counters resume, not restart. The switch
-	// tick itself books no bytes (the ring it reads predates the new usage
-	// epoch); the next delta books normally on top of A's kept counters.
+	// Switch back to dish A: pending tick, then the switch tick — its
+	// counters resume, not restart. The switch tick itself books no bytes
+	// (the ring it reads predates the new usage epoch); the next delta
+	// books normally on top of A's kept counters.
 	c.status = statusWithID("ut-aaa")
 	c.history = mkHist(14, []float32{20}, []float32{0})
-	d.goodTick(t0.Add(6*time.Second), c.status, false, true, 2*time.Second)
-	c.history = mkHist(16, []float32{20}, []float32{0})
 	d.goodTick(t0.Add(8*time.Second), c.status, false, true, 2*time.Second)
+	c.history = mkHist(16, []float32{20}, []float32{0})
+	d.goodTick(t0.Add(10*time.Second), c.status, false, true, 2*time.Second)
+	c.history = mkHist(18, []float32{20}, []float32{0})
+	d.goodTick(t0.Add(12*time.Second), c.status, false, true, 2*time.Second)
 	dfa3 := readJSON(t, partA, "daily.json")
 	if dfa3["totalS"].(float64) != 8 || dfa3["downBytes"].(float64) != 4000 {
 		t.Fatalf("dish A daily after return = %v, want totalS 8 (4 kept + 4 new) and 4000 bytes (2000 kept + 2000 new)", dfa3)
@@ -191,10 +203,12 @@ func TestDishSwitchNoByteBackfill(t *testing.T) {
 	d.goodTick(t0, c.status, false, true, 2*time.Second) // adopt dish A
 
 	// Dish B has a full ring of throughput from before the switch: none of
-	// it is this machine's "today" (same rule as a daemon restart).
+	// it is this machine's "today" (same rule as a daemon restart). First
+	// sighting pends; the second consecutive sighting switches.
 	c.status = statusWithID("ut-bbb")
 	c.history = mkHist(899, []float32{20}, []float32{0})
 	d.goodTick(t0.Add(2*time.Second), c.status, false, true, 2*time.Second)
+	d.goodTick(t0.Add(4*time.Second), c.status, false, true, 2*time.Second)
 	dfb := readJSON(t, filepath.Join(dir, "dishes", "ut-bbb"), "daily.json")
 	if dfb["downBytes"].(float64) != 0 || dfb["upBytes"].(float64) != 0 {
 		t.Fatalf("switch backfilled pre-switch bytes: %v", dfb)
@@ -202,7 +216,7 @@ func TestDishSwitchNoByteBackfill(t *testing.T) {
 
 	// The next ring delta books normally.
 	c.history = mkHist(901, []float32{20}, []float32{0})
-	d.goodTick(t0.Add(4*time.Second), c.status, false, true, 2*time.Second)
+	d.goodTick(t0.Add(6*time.Second), c.status, false, true, 2*time.Second)
 	dfb = readJSON(t, filepath.Join(dir, "dishes", "ut-bbb"), "daily.json")
 	if dfb["downBytes"].(float64) != 2000 || dfb["upBytes"].(float64) != 200 {
 		t.Fatalf("post-switch bytes = %v, want 2000/200", dfb)
@@ -275,16 +289,15 @@ func TestTidyDishes(t *testing.T) {
 	// lastSeen stamp is. 40d-old stamp → swept despite the fresh mtime.
 	staleFreshMtime := mk("ut-freshmtime", t0, oldDay)
 	if err := atomicWrite(filepath.Join(staleFreshMtime, "daily.json"),
-		marshalCompact(dailyFile{LastSeen: old.Unix()})); err != nil {
+		[]byte(`{"lastSeen":`+strconv.FormatInt(old.Unix(), 10)+`}`)); err != nil {
 		t.Fatal(err)
 	}
 	// Mirror: an old mtime with a fresh lastSeen stays (connected recently).
 	// The stamp write comes FIRST, then the mtime is backdated — the pin is
-	// genuinely "old mtime, fresh stamp" (a state only loadDaily's seed
-	// produces in production).
+	// genuinely "old mtime, fresh stamp" (the loadDaily-seed state).
 	keptOldMtime := mk("ut-lastseen", old, "")
 	if err := atomicWrite(filepath.Join(keptOldMtime, "daily.json"),
-		marshalCompact(dailyFile{LastSeen: t0.Unix()})); err != nil {
+		[]byte(`{"lastSeen":`+strconv.FormatInt(t0.Unix(), 10)+`}`)); err != nil {
 		t.Fatal(err)
 	}
 	os.Chtimes(filepath.Join(keptOldMtime, "daily.json"), old, old)
@@ -369,7 +382,13 @@ func TestAdoptLastDish(t *testing.T) {
 	d.dishID = "ut-bbb"
 	d.dishDir = partB
 	d.daily = dailyFile{DownBytes: 4242}
-	d.writeStat("daily.json", d.daily)
+	b, err := marshalCompact(d.daily)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(filepath.Join(partB, "daily.json"), b); err != nil {
+		t.Fatal(err)
+	}
 
 	d2 := newDaemon(config{dir: dir}, nil)
 	d2.adoptLastDish(t0)

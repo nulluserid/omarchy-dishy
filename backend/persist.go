@@ -20,13 +20,14 @@ func stateDir() (string, error) {
 		base = filepath.Join(home, ".local", "state")
 	}
 	dir := filepath.Join(base, "starlinkd")
-	return dir, os.MkdirAll(dir, 0o755)
+	return dir, os.MkdirAll(dir, 0o700)
 }
 
 // atomicWrite writes via tmp+rename so consumers never see partial files.
+// Mode 0600: state files carry the machine's public IP and location metadata.
 func atomicWrite(path string, data []byte) error {
 	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
@@ -42,22 +43,28 @@ func atomicWrite(path string, data []byte) error {
 	return os.Rename(tmp, path)
 }
 
-func marshalCompact(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return []byte("{}")
-	}
-	return b
+// marshalCompact serializes v; a marshal failure is returned, never
+// converted into a valid-but-empty document — a hostile value must not
+// replace previously written state files.
+func marshalCompact(v any) ([]byte, error) {
+	return json.Marshal(v)
 }
 
 // persist writes the contract files for one tick. Write failures are
 // logged, never fatal. hf == nil skips hist.json: idle ticks and failure
 // ticks carry no new history data (CONTRACT.md "hist.json — cadence").
 // status/hist describe the current dish for the UI (state root); daily.json
-// is dish-derived and lands in the dish's partition (CONTRACT.md v4).
+// is dish-derived and lands in the dish's partition (CONTRACT.md v4). A
+// marshal failure skips the write (last-good-wins — a hostile value never
+// replaces a good file with an empty one).
 func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 	write := func(name string, v any) {
-		if err := atomicWrite(filepath.Join(d.cfg.dir, name), marshalCompact(v)); err != nil {
+		b, err := marshalCompact(v)
+		if err != nil {
+			d.vlog("marshal %s: %v — keeping last good file", name, err)
+			return
+		}
+		if err := atomicWrite(filepath.Join(d.cfg.dir, name), b); err != nil {
 			d.vlog("write %s: %v", name, err)
 		}
 	}
@@ -76,7 +83,12 @@ func (d *daemon) persist(now time.Time, sf *statusFile, hf *histFile) {
 // (CONTRACT.md v4 retention).
 func (d *daemon) writeStat(name string, v any) {
 	d.ensureStatDir()
-	if err := atomicWrite(filepath.Join(d.statDir(), name), marshalCompact(v)); err != nil {
+	b, err := marshalCompact(v)
+	if err != nil {
+		d.vlog("marshal %s: %v — keeping last good file", name, err)
+		return
+	}
+	if err := atomicWrite(filepath.Join(d.statDir(), name), b); err != nil {
 		d.vlog("write %s: %v", name, err)
 	}
 }
@@ -84,7 +96,7 @@ func (d *daemon) writeStat(name string, v any) {
 // ensureStatDir creates the current dish's partition directory when missing.
 func (d *daemon) ensureStatDir() {
 	if d.dishDir != "" {
-		os.MkdirAll(d.dishDir, 0o755)
+		os.MkdirAll(d.dishDir, 0o700)
 	}
 }
 

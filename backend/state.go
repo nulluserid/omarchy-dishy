@@ -30,6 +30,16 @@ const (
 	// at most this old (covers the 60 s idle-skim gap plus slack); older
 	// entries only advance the watermark.
 	maxOutageAnnounceWindow = 122 * time.Second
+	// Minimum seconds between dish-reported outage announcements: a hostile
+	// endpoint rotating start timestamps must not fork notify-send per tick.
+	outageReannounceS = 60
+	// Consecutive good ticks a NEW dish identity must be answered before
+	// switchDish adopts it (first-ever sighting adopts immediately). A
+	// strictly rotating hostile id then never switches.
+	dishSwitchDebounceTicks = 2
+	// Hard cap on retained dish partitions; beyond it the least-recently
+	// active are evicted (bounds per-tick identity churn).
+	maxDishPartitions = 64
 )
 
 // Array index order inside daemon.arrays.
@@ -247,6 +257,14 @@ type daemon struct {
 	prevAlerts map[string]bool
 	warm       bool // first good tick observed (no events/notifications)
 	hyst       hyst
+
+	// Dish-identity debounce: a new id must be answered on
+	// dishSwitchDebounceTicks consecutive good ticks before switchDish runs
+	// (hostile id rotation then creates no partitions).
+	pendingID      string
+	pendingIDTicks int
+	// Unix s of the last dish-reported outage announcement (cooldown gate).
+	lastOutageAnnounce int64
 
 	openOutage         *outageTrack
 	failed             int

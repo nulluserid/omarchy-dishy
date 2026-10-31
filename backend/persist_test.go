@@ -109,7 +109,11 @@ func TestDailyRoundTrip(t *testing.T) {
 	d.daily = dailyFile{Date: "2026-10-19", DownBytes: 1234, UpBytes: 567,
 		LastSeen: 1760000000,
 		AllTime:  dailyAllTime{DownBytes: 872400000000}}
-	if err := atomicWrite(filepath.Join(dir, "daily.json"), marshalCompact(d.daily)); err != nil {
+	mb, merr := marshalCompact(d.daily)
+	if merr != nil {
+		t.Fatal(merr)
+	}
+	if err := atomicWrite(filepath.Join(dir, "daily.json"), mb); err != nil {
 		t.Fatal(err)
 	}
 	d2 := newDaemon(config{dir: dir}, nil)
@@ -120,7 +124,11 @@ func TestDailyRoundTrip(t *testing.T) {
 	// A pre-stamp file (≤ v1.4) is seeded from its mtime on load, freezing
 	// the retention stamp (CONTRACT.md retention).
 	seed := dailyFile{Date: "2026-10-19", DownBytes: 5}
-	if err := atomicWrite(filepath.Join(dir, "daily.json"), marshalCompact(seed)); err != nil {
+	sb, serr := marshalCompact(seed)
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if err := atomicWrite(filepath.Join(dir, "daily.json"), sb); err != nil {
 		t.Fatal(err)
 	}
 	mtime := t0

@@ -101,7 +101,7 @@ func TestGoodTickIdleSkipsHistWrite(t *testing.T) {
 func TestGoodTickActiveWritesHist(t *testing.T) {
 	dir := t.TempDir()
 	c := mkStub()
-	c.mapRes = &dish.DishGetObstructionMapResponse{}
+	c.mapRes = &dish.DishGetObstructionMapResponse{NumRows: 4, NumCols: 4, Snr: make([]float32, 16)}
 	d := newDaemon(config{interval: 2 * time.Second, idleHistInterval: 60 * time.Second, geoInterval: 5 * time.Minute, geoTransitionInterval: time.Second, dir: dir}, c)
 	d.startWall = t0.Add(-time.Hour)
 
