@@ -67,6 +67,49 @@ func TestAtomicWrite(t *testing.T) {
 	}
 }
 
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != want {
+		t.Fatalf("%s mode = %o, want %o", path, fi.Mode().Perm(), want)
+	}
+}
+
+func TestUpgradeStatePermissions(t *testing.T) {
+	base := t.TempDir()
+	t.Setenv("XDG_STATE_HOME", base)
+	dir := filepath.Join(base, "starlinkd")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := stateDir(); err != nil || got != dir {
+		t.Fatalf("stateDir = %q, %v", got, err)
+	}
+	assertMode(t, dir, 0o700)
+	p := filepath.Join(dir, "status.json")
+	if err := os.WriteFile(p+".tmp", []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(p, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, p, 0o600)
+	p = filepath.Join(dir, "events.jsonl")
+	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendEvent(dir, event{Type: "state_change"}); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, p, 0o600)
+}
+
 func TestAppendEventRotation(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "events.jsonl")
@@ -85,6 +128,8 @@ func TestAppendEventRotation(t *testing.T) {
 	if old.Size() <= maxEventBytes {
 		t.Errorf("old file size = %d, want > %d", old.Size(), maxEventBytes)
 	}
+	assertMode(t, filepath.Join(dir, "events.old.jsonl"), 0o600)
+	assertMode(t, p, 0o600)
 	cur, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatal(err)

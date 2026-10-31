@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -36,6 +37,7 @@ import (
 )
 
 const geoEndpoint = "https://ifconfig.co/json"
+const maxGeoBytes = 1 << 20
 
 // updateRoute refreshes the default-route fingerprint. A change starts the
 // one-shot probe burst, demands a fresh egress lookup, and anchors
@@ -225,8 +227,17 @@ func (d *daemon) applyGeo(g geoInfo) {
 // launch), so a lookup in flight during a route change can never masquerade
 // as a post-change answer.
 func fetchGeo(at time.Time) (geoInfo, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, geoEndpoint, nil)
+	return fetchGeoURL(at, geoEndpoint)
+}
+
+func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
 		return geoInfo{}, err
 	}
@@ -239,6 +250,13 @@ func fetchGeo(at time.Time) (geoInfo, error) {
 	if resp.StatusCode != http.StatusOK {
 		return geoInfo{}, fmt.Errorf("http %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxGeoBytes+1))
+	if err != nil {
+		return geoInfo{}, err
+	}
+	if len(body) > maxGeoBytes {
+		return geoInfo{}, fmt.Errorf("geo response exceeds %d bytes", maxGeoBytes)
+	}
 	var raw struct {
 		IP         string `json:"ip"`
 		City       string `json:"city"`
@@ -247,7 +265,7 @@ func fetchGeo(at time.Time) (geoInfo, error) {
 		ASN        string `json:"asn"`
 		ASNOrg     string `json:"asn_org"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return geoInfo{}, err
 	}
 	return geoInfo{

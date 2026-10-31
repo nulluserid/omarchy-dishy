@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +19,79 @@ import (
 	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
+
+func TestFetchGeoHTTPBoundary(t *testing.T) {
+	var redirected atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Store(true)
+		_, _ = w.Write([]byte(`{"asn":"AS14593"}`))
+	}))
+	defer destination.Close()
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		wantOK bool
+	}{
+		{"normal", 200, `{"ip":"203.0.113.1","asn":"AS14593","asn_org":"Starlink"}`, true},
+		{"oversize", 200, `{"city":"` + strings.Repeat("x", maxGeoBytes) + `"}`, false},
+		{"trailing oversize", 200, `{}` + strings.Repeat(" ", maxGeoBytes), false},
+		{"invalid", 200, `{`, false},
+		{"redirect", 302, "", false},
+		{"error", 503, `{}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Location", destination.URL)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			g, err := fetchGeoURL(t0, srv.URL)
+			if (err == nil) != tc.wantOK {
+				t.Fatalf("fetch = %+v, %v", g, err)
+			}
+			if tc.wantOK {
+				if !g.IsStarlink || g.IP != "203.0.113.1" || g.Ts != t0.Unix() {
+					t.Fatalf("unexpected geo: %+v", g)
+				}
+			} else {
+				d := newDaemon(config{}, nil)
+				before := geoInfo{Ts: t0.Unix(), IP: "198.51.100.1"}
+				d.geo = before
+				d.applyGeo(g)
+				if d.geo != before {
+					t.Fatal("failed lookup replaced last good geo")
+				}
+			}
+		})
+	}
+	if redirected.Load() {
+		t.Fatal("redirect destination was contacted")
+	}
+}
+
+func TestDialRejectsURLTargets(t *testing.T) {
+	for _, target := range []string{"dns:///dish.local:9200", "unix:///tmp/dish:9200", "dish.local/path:9200", "user@dish.local:9200", "dish.local?x:9200", "dish.local#x:9200", "dish%2elocal:9200", `dish\local:9200`} {
+		if _, err := normalizeTarget(target); err == nil {
+			t.Errorf("normalize accepted %q", target)
+		}
+		if conn, err := dial(target); err == nil {
+			conn.Close()
+			t.Errorf("dial accepted %q", target)
+		}
+	}
+	for _, target := range []string{"192.168.100.1:9200", "dish.local:9200", "[::1]:9200", "unix:9200", "unix-abstract:9200", "dns:9200", "passthrough:9200"} {
+		conn, err := dial(target)
+		if err != nil {
+			t.Fatalf("dial rejected %q: %v", target, err)
+		}
+		if got, want := conn.CanonicalTarget(), "dns:///"+target; got != want {
+			t.Errorf("dial(%q) canonical target = %q, want %q", target, got, want)
+		}
+		conn.Close()
+	}
+}
 
 // stubClient routes Handle by request kind so full goodTick/failTick cycles
 // run without a dish.

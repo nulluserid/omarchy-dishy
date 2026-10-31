@@ -18,7 +18,14 @@ import (
 
 // dial connects to the dish. The connection is lazy; failures surface per RPC.
 func dial(target string) (*grpc.ClientConn, error) {
-	return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	var err error
+	target, err = normalizeTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	// Treat even resolver-named hosts ("unix:9200", "dns:9200") as TCP
+	// host:port, not opaque gRPC resolver URIs.
+	return grpc.NewClient("dns:///"+target, grpc.WithTransportCredentials(insecure.NewCredentials()))
 }
 
 func rpcErr(err error) string {

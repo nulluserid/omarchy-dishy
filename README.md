@@ -11,7 +11,8 @@ usage, availability, dish alerts, and stow/unstow/reboot controls.
 omarchy plugin add https://github.com/nulluserid/omarchy-dishy.git --enable
 ```
 
-Then run `./install.sh` once (from this directory) to install the `starlinkd`
+Then run `./install.sh` once from
+`~/.config/omarchy/plugins/io.github.nulluserid.dishy/` to install the `starlinkd`
 backend service. The bar widget shows live data within ~2 seconds.
 
 After a plugin update (`omarchy plugin update`), restart the shell once to
@@ -84,15 +85,23 @@ pick up dashboard changes — the shell caches QML until restart.
 dependencies, deterministically built with `CGO_ENABLED=0 -trimpath
 -buildvcs=false` and version-stamped to the release tag — verify with
 `go version -m backend/bin/starlinkd` and `backend/bin/starlinkd -version`).
-To rebuild it yourself at a tag: `backend/build.sh` needs `go` (≥ 1.27, matching backend/go.mod)
-and `protoc`; the protobuf descriptors are captured from the dish itself via
+To rebuild it yourself at a tag: `backend/build.sh` needs the exact Go version
+in `backend/go.mod`, `jq`, `protoc`, `protoc-gen-go v1.36.12`, and
+`protoc-gen-go-grpc v1.6.2`; the protobuf descriptors are captured from the dish itself via
 gRPC reflection (`backend/proto/dish.pb`) — nothing hand-maintained.
+The build refuses a different compiler or a version stamp that disagrees with
+the manifest. Source and bundled-runtime vulnerability scans, tests, and a
+byte-identical rebuild are required before release (see [RELEASING.md](RELEASING.md)).
 
 ## Install
 
 1. `omarchy plugin add https://github.com/nulluserid/omarchy-dishy.git --enable`
-2. From the plugin directory: `./install.sh`
+2. `cd ~/.config/omarchy/plugins/io.github.nulluserid.dishy && ./install.sh`
    (installs + enables the `starlinkd` systemd user service)
+
+The installer refuses other checkouts: the service always runs the canonical
+plugin path above, so running it in a development clone must not silently
+restart a different binary.
 
 Optional keybind — toggle the panel with `omarchy-shell dishy toggle`.
 

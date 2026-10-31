@@ -11,6 +11,7 @@ ProtectSystem=full
 PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=256M
+UMask=0077
 ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd
 Restart=on-failure
 RestartSec=5
