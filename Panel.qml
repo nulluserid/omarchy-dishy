@@ -46,9 +46,16 @@ Panel {
   }
 
   // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
-  // The stamp re-binds at local midnight so the chart follows the day.
+  // Lives in the current dish's partition (CONTRACT.md v4); the stamp
+  // re-binds at local midnight and the path follows the dish identity.
   property var dayData: null
   property string dayStamp: Qt.formatDateTime(new Date(), "yyyyMMdd")
+  readonly property string dayPath: {
+    var id = s && s.dish ? String(s.dish.id || "") : ""
+    var dir = id !== "" ? Model.dishDirName(id) : ""
+    return root.stateDir + (dir !== "" ? "/dishes/" + dir : "")
+      + "/day-" + root.dayStamp + ".json"
+  }
   function reloadDay() {
     root.dayStamp = Qt.formatDateTime(new Date(), "yyyyMMdd")
     try {
@@ -171,8 +178,8 @@ Panel {
     open: root.opened
     centerOnBar: true
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(780))
-    contentHeight: panel.fittedContentHeight(Style.space(660))
+    contentWidth: panel.fittedContentWidth(Style.space(720))
+    contentHeight: panel.fittedContentHeight(Style.space(480))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -221,17 +228,19 @@ Panel {
         Column {
           id: dashColumn
           width: dashScroll.width
-          spacing: Style.space(9)
+          spacing: Style.space(6)
 
-          // ---- Header ----
+          // ---- Header: state chip + identity (80s-readout dense) ----
           Row {
+            id: headerRow
             width: parent.width
             spacing: Style.space(10)
 
             Rectangle {
-              implicitWidth: stateRow.implicitWidth + Style.space(20)
-              implicitHeight: Style.space(36)
-              radius: Style.space(6)
+              id: stateChip
+              implicitWidth: stateRow.implicitWidth + Style.space(16)
+              implicitHeight: Style.space(30)
+              radius: Style.space(5)
               color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, 0.12)
               border.width: 1
               border.color: root.stateColor
@@ -239,11 +248,11 @@ Panel {
               Row {
                 id: stateRow
                 anchors.centerIn: parent
-                spacing: Style.space(8)
+                spacing: Style.space(7)
 
                 Rectangle {
                   anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(10)
+                  width: Style.space(8)
                   height: width
                   radius: height / 2
                   color: root.stateColor
@@ -255,7 +264,7 @@ Panel {
                   textFormat: Text.PlainText
                   color: root.fg
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.heading
+                  font.pixelSize: Style.font.body
                   font.bold: true
                 }
               }
@@ -263,27 +272,29 @@ Panel {
 
             Column {
               anchors.verticalCenter: parent.verticalCenter
-              spacing: Style.space(2)
+              width: headerRow.width - stateChip.implicitWidth - headerRow.spacing
+              spacing: 0
 
               Text {
                 text: root.hasData
                   ? "up " + Model.humanDur(s.dish ? s.dish.uptimeS : null)
-                    + "  ·  GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—") + " sats"
-                    + "  ·  eth " + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
+                    + " · GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—")
+                    + " · eth " + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
                   : ""
                 textFormat: Text.PlainText
                 color: root.fg
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.bodySmall
               }
 
               Text {
-                text: root.hasData
-                  ? (s.dish ? s.dish.hw : "—") + "  ·  " + (s.dish ? s.dish.sw : "—")
+                text: root.hasData && s.dish
+                  ? String(s.dish.id || "").substring(0, 8) + " · " + (s.dish.hw || "—")
+                    + " · " + String(s.dish.sw || "—").split(".").slice(0, 3).join(".")
                   : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                width: Math.min(implicitWidth, parent.width)
+                width: Math.min(implicitWidth, headerRow.width - stateChip.implicitWidth - headerRow.spacing)
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -294,15 +305,15 @@ Panel {
           // ---- Alert + update chips ----
           Flow {
             width: parent.width
-            spacing: Style.space(6)
+            spacing: Style.space(5)
 
             Repeater {
               model: root.hasData && s.alerts ? s.alerts : []
 
               Rectangle {
                 required property var modelData
-                implicitWidth: chipLabel.implicitWidth + Style.space(14)
-                implicitHeight: chipLabel.implicitHeight + Style.space(8)
+                implicitWidth: chipLabel.implicitWidth + Style.space(12)
+                implicitHeight: chipLabel.implicitHeight + Style.space(6)
                 radius: height / 2
                 color: "transparent"
                 border.width: 1
@@ -323,8 +334,8 @@ Panel {
             // Software update / state detail chip.
             Rectangle {
               visible: root.hasData && updateText !== ""
-              implicitWidth: updateLabel.implicitWidth + Style.space(14)
-              implicitHeight: updateLabel.implicitHeight + Style.space(8)
+              implicitWidth: updateLabel.implicitWidth + Style.space(12)
+              implicitHeight: updateLabel.implicitHeight + Style.space(6)
               radius: height / 2
               color: "transparent"
               border.width: 1
@@ -355,156 +366,194 @@ Panel {
             }
           }
 
-          // ---- Latency ----
-          GraphSection {
-            title: "LATENCY"
-            valueText: Model.fmtMs(root.hasData && s.live ? s.live.latencyMs : null)
-            series: Model.decimate(h ? h.latencyMs : [], width)
-            guides: root.latencyGuides
-            autoScale: true
-            plotHeight: 72
-          }
-
-          // ---- Throughput ----
-          Column {
+          // ---- Graph grid (two columns, 80s-readout dense) ----
+          Row {
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.space(10)
 
-            Item {
-              width: parent.width
-              height: Math.max(throughputTitle.implicitHeight, legend.implicitHeight)
+            // Latency: plot, drop strip, drops line.
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.space(3)
+
+              Item {
+                width: parent.width
+                height: Math.max(latTitle.implicitHeight, latValue.implicitHeight)
+
+                Text {
+                  id: latTitle
+                  text: "LATENCY"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  id: latValue
+                  anchors.right: parent.right
+                  text: Model.fmtMs(root.hasData && s.live ? s.live.latencyMs : null)
+                  textFormat: Text.PlainText
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+              }
+
+              Sparkline {
+                width: parent.width
+                height: Style.space(46)
+                values: Model.decimate(h ? h.latencyMs : [], width)
+                guides: root.latencyGuides
+                autoScale: true
+                lineColor: Color.accent
+              }
+
+              DropStrip {
+                width: parent.width
+                drops: h ? h.dropRate : []
+              }
 
               Text {
-                id: throughputTitle
-                text: "THROUGHPUT"
+                width: parent.width
+                text: root.hasData && s.drop15m
+                  ? "drops " + Model.fmtPct(s.drop15m.ratio * 100, 2) + " · "
+                    + (s.drop15m.count15m || 0) + " ev · " + Model.humanDur(s.drop15m.totalOutageS)
+                  : ""
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+
+            // Throughput: down (fill) + up (line), legend line under.
+            Column {
+              width: (parent.width - parent.spacing) / 2
+              spacing: Style.space(3)
+
+              Item {
+                width: parent.width
+                height: Math.max(thrTitle.implicitHeight, thrValue.implicitHeight)
+
+                Text {
+                  id: thrTitle
+                  text: "THROUGHPUT"
+                  textFormat: Text.PlainText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  font.bold: true
+                }
+
+                Text {
+                  id: thrValue
+                  anchors.right: parent.right
+                  text: root.hasData && s.live
+                    ? "↓" + Model.fmtMbps(s.live.downMbps) + " ↑" + Model.fmtMbps(s.live.upMbps)
+                    : ""
+                  textFormat: Text.PlainText
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+              }
+
+              Item {
+                width: parent.width
+                height: Style.space(46)
+
+                Sparkline {
+                  anchors.fill: parent
+                  values: Model.decimate(h ? h.downMbps : [], width)
+                  maxValue: root.throughputMax
+                  lineColor: Color.accent
+                  area: true
+                }
+
+                Sparkline {
+                  anchors.fill: parent
+                  values: Model.decimate(h ? h.upMbps : [], width)
+                  maxValue: root.throughputMax
+                  lineColor: Model.WARN_HEX
+                }
+              }
+
+              Text {
+                width: parent.width
+                text: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
+                  ? "typ ↓ " + Model.fmtMbps(s.live.typicalDownMbps)
+                  : "↓ down (fill) · ↑ up (line)"
+                textFormat: Text.PlainText
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+            }
+          }
+
+          // ---- Today | Power grid ----
+          Row {
+            width: parent.width
+            spacing: Style.space(10)
+
+            GraphSection {
+              width: root.hasPower ? (parent.width - parent.spacing) / 2 : parent.width
+              title: "TODAY"
+              valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
+                ? Model.fmtMbps(s.live.typicalDownMbps)
+                : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
+              series: root.daySeries
+              autoScale: true
+              plotHeight: 38
+            }
+
+            GraphSection {
+              visible: root.hasPower
+              width: (parent.width - parent.spacing) / 2
+              title: "POWER"
+              valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
+              series: Model.decimate(h ? h.powerW : [], width)
+              autoScale: true
+              plotHeight: 38
+            }
+          }
+
+          // ---- Outages (compact; newest first) ----
+          Column {
+            width: parent.width
+            spacing: Style.space(2)
+            visible: !!(h && h.outages && h.outages.length > 0)
+
+            Row {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Text {
+                text: "OUTAGES"
                 textFormat: Text.PlainText
                 color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.bodySmall
                 font.bold: true
               }
 
-              Row {
-                id: legend
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                spacing: Style.space(10)
-
-                Repeater {
-                  model: [
-                    { label: "↓ down", color: String(Color.accent),
-                      v: root.hasData && s.live ? s.live.downMbps : null },
-                    { label: "typ ↓", color: String(Color.accent),
-                      v: root.hasData && s.live ? s.live.typicalDownMbps : null },
-                    { label: "↑ up", color: Model.WARN_HEX,
-                      v: root.hasData && s.live ? s.live.upMbps : null }
-                  ]
-
-                  Row {
-                    required property var modelData
-                    spacing: Style.space(4)
-
-                    Rectangle {
-                      anchors.verticalCenter: parent.verticalCenter
-                      width: Style.space(8)
-                      height: width
-                      radius: height / 2
-                      color: modelData.color
-                    }
-
-                    Text {
-                      anchors.verticalCenter: parent.verticalCenter
-                      text: modelData.label + " " + Model.fmtMbps(modelData.v)
-                      textFormat: Text.PlainText
-                      color: root.fg
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.bodySmall
-                    }
-                  }
-                }
+              Text {
+                text: h && h.outages ? h.outages.length + " recent" : ""
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
-            }
-
-            Item {
-              width: parent.width
-              height: Style.space(60)
-
-              Sparkline {
-                anchors.fill: parent
-                values: Model.decimate(h ? h.downMbps : [], width)
-                maxValue: root.throughputMax
-                lineColor: Color.accent
-                area: true
-              }
-
-              Sparkline {
-                anchors.fill: parent
-                values: Model.decimate(h ? h.upMbps : [], width)
-                maxValue: root.throughputMax
-                lineColor: Model.WARN_HEX
-              }
-            }
-          }
-
-          // ---- Today (per-minute typical down, from day-*.json) ----
-          GraphSection {
-            title: "TODAY"
-            valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-              ? Model.fmtMbps(s.live.typicalDownMbps)
-              : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
-            series: root.daySeries
-            autoScale: true
-            plotHeight: 56
-          }
-
-          // ---- Power (Mini) ----
-          GraphSection {
-            visible: root.hasPower
-            title: "POWER"
-            valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
-            series: Model.decimate(h ? h.powerW : [], width)
-            autoScale: true
-            plotHeight: 42
-          }
-
-          // ---- Drop strip ----
-          Column {
-            width: parent.width
-            spacing: Style.space(4)
-            visible: root.hasData && s.drop15m !== undefined
-
-            KVRow {
-              label: "DROPS 15M"
-              value: root.hasData && s.drop15m
-                ? Model.fmtPct(s.drop15m.ratio * 100, 2) + "  ·  " + (s.drop15m.count15m || 0)
-                  + " events  ·  " + Model.humanDur(s.drop15m.totalOutageS) + " out"
-                : ""
-              bold: true
-            }
-
-            DropStrip {
-              width: parent.width
-              drops: h ? h.dropRate : []
-            }
-          }
-
-          // ---- Outages ----
-          Column {
-            width: parent.width
-            spacing: Style.space(4)
-            visible: !!(h && h.outages && h.outages.length > 0)
-
-            Text {
-              text: "RECENT OUTAGES"
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
             }
 
             Repeater {
-              model: h && h.outages ? h.outages.slice(0, 5) : []
+              model: h && h.outages ? h.outages.slice(0, 3) : []
 
               Text {
                 required property var modelData
@@ -513,149 +562,198 @@ Panel {
                 readonly property bool plausibleStart: modelData.start > 1609459200
                 width: parent.width
                 text: (modelData.cause ? Model.titleCase(modelData.cause) : "Unknown")
-                  + (plausibleStart ? "  ·  " + Model.agoText(modelData.start, Date.now() / 1000) : "")
-                  + "  ·  lasted " + Model.humanDur(modelData.durS)
+                  + (plausibleStart ? " · " + Model.agoText(modelData.start, Date.now() / 1000) : "")
+                  + " · " + Model.humanDur(modelData.durS)
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
                 color: root.fg
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.body
+                font.pixelSize: Style.font.bodySmall
               }
             }
           }
 
-          // ---- Obstruction ----
-          Column {
+          // ---- Obstruction | Connection side by side ----
+          Row {
             width: parent.width
-            spacing: Style.space(4)
+            spacing: Style.space(10)
 
-            Text {
-              text: "OBSTRUCTION"
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-            }
+            Column {
+              width: parent.width * 0.55 - parent.spacing / 2
+              spacing: Style.space(3)
 
-            Row {
-              width: parent.width
-              spacing: Style.space(14)
-
-              ObsMap {
-                id: obsMapPlot
-                anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(120)
-                height: Style.space(120)
-                snr: h && h.map ? h.map.snr : []
-                rows: h && h.map ? h.map.rows : 0
-                cols: h && h.map ? h.map.cols : 0
-                maxThetaDeg: h && h.map ? h.map.maxThetaDeg : 90
-                baseColor: root.dim
+              Text {
+                text: "OBSTRUCTION"
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
               }
 
-              Column {
-                anchors.verticalCenter: parent.verticalCenter
-                width: parent.width - obsMapPlot.width - parent.spacing
-                spacing: Style.space(6)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
 
-                Repeater {
-                  model: root.hasData && s.obs ? [
-                    { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
-                    { label: "Time obstructed", value: Model.humanDur(s.obs.timeObstructedS) },
-                    { label: "Valid for", value: Model.humanDur(s.obs.validS) },
-                    { label: "Field of view", value: "θ ≤ " + (h && h.map ? h.map.maxThetaDeg : 90) + "°" }
-                  ] : []
+                ObsMap {
+                  id: obsMapPlot
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(84)
+                  height: Style.space(84)
+                  snr: h && h.map ? h.map.snr : []
+                  rows: h && h.map ? h.map.rows : 0
+                  cols: h && h.map ? h.map.cols : 0
+                  maxThetaDeg: h && h.map ? h.map.maxThetaDeg : 90
+                  baseColor: root.dim
+                }
 
-                  KVRow {
-                    required property var modelData
-                    label: modelData.label
-                    value: modelData.value
+                Column {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width - obsMapPlot.width - parent.spacing
+                  spacing: 0
+
+                  Repeater {
+                    model: root.hasData && s.obs ? [
+                      { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
+                      { label: "Time", value: Model.humanDur(s.obs.timeObstructedS) },
+                      { label: "Valid", value: Model.humanDur(s.obs.validS) },
+                      { label: "FoV", value: "θ ≤ " + (h && h.map ? h.map.maxThetaDeg : 90) + "°" }
+                    ] : []
+
+                    KVRow {
+                      required property var modelData
+                      small: true
+                      label: modelData.label
+                      value: modelData.value
+                    }
                   }
                 }
               }
             }
-          }
 
-          // ---- Connection (public IP + approximate exit location) ----
-          Column {
-            width: parent.width
-            spacing: Style.space(4)
-            visible: !!(root.hasData && s.geo)
+            Column {
+              width: parent.width * 0.45 - parent.spacing / 2
+              spacing: Style.space(3)
 
-            Text {
-              text: "CONNECTION"
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-              font.bold: true
-            }
+              Text {
+                text: "CONNECTION"
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
 
-            Repeater {
-              model: root.hasData && s.geo ? [
-                { label: "Public IP", value: String(s.geo.ip || "—") },
-                { label: "Exit location", value: Model.geoPlace(s.geo) || "—" },
-                { label: "Network", value: (s.geo.org ? String(s.geo.org) : "—")
-                  + (s.geo.asn ? "  (" + s.geo.asn + ")" : "") }
-              ] : []
+              Column {
+                width: parent.width
+                spacing: 0
+                visible: !!(root.hasData && s.geo)
 
-              KVRow {
-                required property var modelData
-                label: modelData.label
-                value: modelData.value
+                KVRow {
+                  small: true
+                  label: "IP"
+                  value: root.hasData && s.geo ? String(s.geo.ip || "—") : ""
+                }
+                KVRow {
+                  small: true
+                  label: "Exit"
+                  value: root.hasData && s.geo ? (Model.geoPlace(s.geo) || "—") : ""
+                }
+                KVRow {
+                  small: true
+                  label: "Net"
+                  value: root.hasData && s.geo
+                    ? (s.geo.org ? String(s.geo.org) : "—") + (s.geo.asn ? " (" + s.geo.asn + ")" : "")
+                    : ""
+                }
+
+                Text {
+                  width: parent.width
+                  text: "approximate egress"
+                  textFormat: Text.PlainText
+                  elide: Text.ElideRight
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
+
+              Text {
+                visible: !(root.hasData && s.geo)
+                width: parent.width
+                text: "no egress data yet"
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
               }
             }
+          }
+
+          // ---- Usage / availability grid ----
+          PanelSeparator { foreground: root.fg }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(12)
 
             Text {
-              visible: !!(root.hasData && s.geo)
-              text: "where your traffic leaves the network (approximate)"
+              width: (parent.width - 2 * parent.spacing) * 0.32
+              text: root.hasData && s.usage
+                ? "TODAY ↓ " + Model.fmtGB(s.usage.downGB) + " ↑ " + Model.fmtGB(s.usage.upGB)
+                : ""
               textFormat: Text.PlainText
-              color: root.dim
+              elide: Text.ElideRight
+              color: root.fg
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
-            }
-          }
-
-          // ---- Footer stats ----
-          Column {
-            width: parent.width
-            spacing: Style.space(4)
-
-            PanelSeparator { foreground: root.fg }
-
-            Repeater {
-              model: root.hasData && s.usage ? [
-                { label: "Today", value: "↓ " + Model.fmtGB(s.usage.downGB) + "  ↑ " + Model.fmtGB(s.usage.upGB) },
-                { label: "All-time", value: "↓ " + Model.fmtGB(s.usage.allTimeDownGB) + "  ↑ " + Model.fmtGB(s.usage.allTimeUpGB) },
-                { label: "Availability", value: "today " + Model.fmtPct(s.avail ? s.avail.todayPct : null, 2)
-                  + "  ·  session " + Model.fmtPct(s.avail ? s.avail.sessionPct : null, 2) }
-              ] : []
-
-              KVRow {
-                required property var modelData
-                label: modelData.label
-                value: modelData.value
-              }
-            }
-          }
-
-          // ---- Controls (owner-approved): two-step confirm each ----
-          Column {
-            width: parent.width
-            spacing: Style.space(6)
-
-            Text {
-              text: "CONTROLS"
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
               font.bold: true
             }
+
+            Text {
+              width: (parent.width - 2 * parent.spacing) * 0.40
+              text: root.hasData && s.usage
+                ? "ALL-TIME ↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB)
+                : ""
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+
+            Text {
+              width: (parent.width - 2 * parent.spacing) * 0.28
+              text: root.hasData && s.avail
+                ? "AVAIL " + Model.fmtPct(s.avail.todayPct, 1) + " / " + Model.fmtPct(s.avail.sessionPct, 1)
+                : ""
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              font.bold: true
+            }
+          }
+
+          // ---- Controls (owner-approved): inline title + two-step confirm ----
+          Column {
+            width: parent.width
+            spacing: Style.space(3)
 
             Row {
               spacing: Style.space(8)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "CONTROLS"
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                font.bold: true
+              }
 
               Repeater {
                 model: [
@@ -730,7 +828,7 @@ Panel {
   }
 
   FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }
-  FileView { id: dayFile; path: root.stateDir + "/day-" + root.dayStamp + ".json"; blockLoading: true }
+  FileView { id: dayFile; path: root.dayPath; blockLoading: true }
 
   Process {
     id: ctl
@@ -757,10 +855,10 @@ Panel {
     property var guides: []
     property bool autoScale: false
     property real maxValue: 100
-    property int plotHeight: 50
+    property int plotHeight: 40
 
     width: parent ? parent.width : 0
-    spacing: Style.space(4)
+    spacing: Style.space(3)
 
     Item {
       width: parent.width
@@ -772,7 +870,7 @@ Panel {
         textFormat: Text.PlainText
         color: root.dim
         font.family: root.fontFamily
-        font.pixelSize: Style.font.body
+        font.pixelSize: Style.font.bodySmall
         font.bold: true
       }
 
@@ -783,7 +881,7 @@ Panel {
         textFormat: Text.PlainText
         color: root.fg
         font.family: root.fontFamily
-        font.pixelSize: Style.font.heading
+        font.pixelSize: Style.font.body
         font.bold: true
       }
     }
@@ -805,6 +903,7 @@ Panel {
     property string label: ""
     property string value: ""
     property bool bold: false
+    property bool small: false
 
     width: parent ? parent.width : 0
     implicitHeight: Math.max(kvLabel.implicitHeight, kvValue.implicitHeight)
@@ -817,7 +916,7 @@ Panel {
       elide: Text.ElideRight
       color: root.dim
       font.family: root.fontFamily
-      font.pixelSize: Style.font.body
+      font.pixelSize: kv.small ? Style.font.bodySmall : Style.font.body
       font.bold: kv.bold
     }
 
@@ -828,7 +927,7 @@ Panel {
       textFormat: Text.PlainText
       color: root.fg
       font.family: root.fontFamily
-      font.pixelSize: Style.font.body
+      font.pixelSize: kv.small ? Style.font.bodySmall : Style.font.body
       font.bold: kv.bold
     }
   }
@@ -841,8 +940,8 @@ Panel {
 
     readonly property bool armed: root.armedAction === action
 
-    implicitWidth: cbLabel.implicitWidth + Style.space(16)
-    implicitHeight: Style.space(30)
+    implicitWidth: cbLabel.implicitWidth + Style.space(12)
+    implicitHeight: Style.space(26)
     radius: Style.space(6)
     color: armed ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18) : "transparent"
     border.width: 1

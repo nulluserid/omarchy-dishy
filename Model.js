@@ -169,6 +169,16 @@ function geoPlace(geo) {
   return out.length ? out.join(", ") : null
 }
 
+// Dish partition directory for a dish id — mirror of starlinkd's
+// dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only (anything else
+// becomes "-"), capped at 64 chars, "."/".."/"" mapped to "unknown" so a
+// hostile id cannot escape the dishes/ directory.
+function dishDirName(id) {
+  var s = String(id || "").toLowerCase().replace(/[^a-z0-9._-]/g, "-").substring(0, 64)
+  if (s === "" || s === "." || s === "..") return "unknown"
+  return s
+}
+
 // One-line bar tooltip summary: state + live numbers + every active alert
 // and the software-update state, so a glance at the tooltip never misses
 // what the dish is telling us.
