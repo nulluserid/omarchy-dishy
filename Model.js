@@ -122,6 +122,17 @@ function fmtGB(v) {
   return (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + " GB"
 }
 
+// Lifetime usage for display. The daemon keeps `allTime` as completed days
+// only (rolled at local midnight), so today's bytes are added here: otherwise
+// ALL-TIME sits unchanged all day and can read below TODAY. Null-safe — a
+// missing side counts as 0, both missing stays null.
+function lifetimeGB(allTimeGB, todayGB) {
+  var a = num(allTimeGB)
+  var t = num(todayGB)
+  if (a === null && t === null) return null
+  return (a === null ? 0 : a) + (t === null ? 0 : t)
+}
+
 function fmtPct(v, decimals) {
   var n = num(v)
   return n === null ? "—" : n.toFixed(decimals === undefined ? 1 : decimals) + "%"
