@@ -11,7 +11,7 @@ BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
 
-  readonly property string glyph: "\udb86\udc80"  // nf-md-satellite_uplink
+  readonly property string glyph: "\udb82\udd09"  // nf-md-satellite_uplink (U+F0909)
   readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/starlinkd"
 
   // Parsed status.json (null = missing/corrupt) and 30s staleness flag.
