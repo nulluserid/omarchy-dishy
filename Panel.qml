@@ -164,9 +164,15 @@ Panel {
     return m
   }
 
+  // True only when the dish actually meters draw. Hardware that does not
+  // report power fills the ring with 0s (rev1 pre-production firmware does),
+  // which presence alone cannot tell apart from a real reading — so treat
+  // all-zero as "not reported" and hide the block instead of claiming 0.0 W
+  // beside an empty plot. A live idle draw is tens of watts, so a positive
+  // test can never hide a dish that does measure.
   readonly property bool hasPower: {
     var p = h ? h.powerW : []
-    for (var i = 0; i < p.length; i++) if (p[i] !== null && p[i] !== undefined) return true
+    for (var i = 0; i < p.length; i++) if (p[i] > 0) return true
     return false
   }
 
