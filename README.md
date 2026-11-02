@@ -46,9 +46,10 @@ pick up dashboard changes — the shell caches QML until restart.
   - latency graph (15 min, 1 s resolution, p50/p95 guides) beside
     throughput (down fill / up line, typical-active readout) — drop strip
     and 15-min drop stats under the latency plot
-  - Today chart (per-minute typical active throughput, 30-day rolling
-    history in `~/.local/state/starlinkd/dishes/<dish-id>/day-YYYYMMDD.json`)
-    beside power draw
+  - last-24h chart (per-minute typical active throughput, stitched from the
+    current and previous day files in
+    `~/.local/state/starlinkd/dishes/<dish-id>/day-YYYYMMDD.json`, 30-day
+    rolling history) with an avg/peak readout, beside power draw
   - recent outages with cause and duration (dish-reported, latest three)
   - obstruction view (sky-coverage map + stats) beside the egress lookup:
     public IP + approximate exit city/region and carrier — one ifconfig.co
