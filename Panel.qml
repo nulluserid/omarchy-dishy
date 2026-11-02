@@ -45,42 +45,70 @@ Panel {
     }
   }
 
-  // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
-  // Lives in the current dish's partition (CONTRACT.md v4); the stamp
-  // re-binds at local midnight and the path follows the dish identity.
+  // day-YYYYMMDD.json: per-minute day aggregates, read only while open. Lives
+  // in the current dish's partition (CONTRACT.md v4). The chart is a FIXED
+  // trailing 24 h window, so yesterday's file is stitched in ahead of today's
+  // (Model.rolling24h) — otherwise the plot went blank at the local midnight
+  // roll, discarding a full day of data that is still on disk. Both stamps
+  // re-bind at midnight; the paths follow the dish identity.
   property var dayData: null
+  property var prevDayData: null
   property string dayStamp: Qt.formatDateTime(new Date(), "yyyyMMdd")
-  readonly property string dayPath: {
-    var id = s && s.dish ? String(s.dish.id || "") : ""
-    var dir = id !== "" ? Model.dishDirName(id) : ""
-    return root.stateDir + (dir !== "" ? "/dishes/" + dir : "")
-      + "/day-" + root.dayStamp + ".json"
+  property string prevDayStamp: root.stampOffset(-1)
+
+  function stampOffset(days) {
+    var d = new Date()
+    d.setDate(d.getDate() + days) // local-date arithmetic survives DST, unlike now-24h
+    return Qt.formatDateTime(d, "yyyyMMdd")
   }
+
+  readonly property string dayDir: {
+    var id = s && s.dish ? String(s.dish.id || "") : ""
+    return id !== "" ? "/dishes/" + Model.dishDirName(id) : ""
+  }
+  // Empty until the dish identity arrives from the bar widget: an empty path
+  // is a no-op for FileView, so the panel load does not probe (and warn about)
+  // a root-level day file that never exists.
+  readonly property string dayBase:
+    root.dayDir === "" ? "" : root.stateDir + root.dayDir + "/day-"
+  readonly property string dayPath:
+    root.dayBase === "" ? "" : root.dayBase + root.dayStamp + ".json"
+  readonly property string prevDayPath:
+    root.dayBase === "" ? "" : root.dayBase + root.prevDayStamp + ".json"
+
   function reloadDay() {
     root.dayStamp = Qt.formatDateTime(new Date(), "yyyyMMdd")
+    root.prevDayStamp = root.stampOffset(-1)
     try {
       dayFile.reload()
       root.dayData = Model.parse(dayFile.text())
     } catch (e) {
       root.dayData = null
     }
+    try {
+      prevDayFile.reload()
+      root.prevDayData = Model.parse(prevDayFile.text())
+    } catch (e) {
+      root.prevDayData = null
+    }
   }
 
-  // Today's typical-down series so far (minute-of-day order, null gaps).
+  // Trailing 24 h of typical-down as a fixed 1440-slot window (null gaps):
+  // yesterday's tail followed by today's elapsed minutes. The window is always
+  // full-length so time-per-pixel stays constant instead of rescaling as data
+  // accumulates; a fresh install simply has gaps on the left.
   readonly property var daySeries: {
-    if (!root.dayData || !root.dayData.minutes) return []
     var now = new Date()
     var cur = now.getHours() * 60 + now.getMinutes()
-    var m = root.dayData.minutes
-    var out = []
-    for (var i = 0; i <= cur && i < m.length; i++) {
-      var v = m[i] ? m[i].downTyp : null
-      out.push(v ? v : null)
-    }
-    return out
+    var prev = root.prevDayData && root.prevDayData.minutes ? root.prevDayData.minutes : []
+    var today = root.dayData && root.dayData.minutes ? root.dayData.minutes : []
+    return Model.rolling24h(prev, today, cur)
   }
 
-  // Today's peak typical, for the section value line.
+  // Window mean typical-down, for the section value line beside the peak.
+  readonly property var dayAvg: Model.mean(root.daySeries)
+
+  // Peak typical over that window, for the section value line.
   readonly property var dayPeak: {
     var peak = null
     var a = root.daySeries
@@ -497,17 +525,24 @@ Panel {
             }
           }
 
-          // ---- Today | Power grid ----
+          // ---- Trailing 24 h | Power grid ----
           Row {
             width: parent.width
             spacing: Style.space(10)
 
             GraphSection {
               width: root.hasPower ? (parent.width - parent.spacing) / 2 : parent.width
-              title: "TODAY"
-              valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-                ? Model.fmtMbps(s.live.typicalDownMbps)
-                : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
+              title: "LAST 24H"
+              // The value line summarises the WINDOW, not the instant: the
+              // live rate already belongs to THROUGHPUT ("typ ↓ …" under its
+              // graph), and repeating it here labelled "now" put two different
+              // numbers on screen that both read as the current download speed.
+              valueText: {
+                var parts = []
+                if (root.dayAvg !== null) parts.push("avg " + Model.fmtMbps(root.dayAvg))
+                if (root.dayPeak !== null) parts.push("peak " + Model.fmtMbps(root.dayPeak))
+                return parts.length ? parts.join(" · ") : "—"
+              }
               series: root.daySeries
               autoScale: true
               plotHeight: 38
@@ -828,7 +863,20 @@ Panel {
   }
 
   FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }
-  FileView { id: dayFile; path: root.dayPath; blockLoading: true }
+  // printErrors off: yesterday's file legitimately does not exist on a fresh
+  // install, and the 2 s reload would otherwise log a warning every tick.
+  FileView {
+    id: dayFile
+    path: root.dayPath
+    blockLoading: true
+    printErrors: false
+  }
+  FileView {
+    id: prevDayFile
+    path: root.prevDayPath
+    blockLoading: true
+    printErrors: false
+  }
 
   Process {
     id: ctl
