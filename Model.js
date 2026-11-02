@@ -193,7 +193,9 @@ function summary(status) {
     parts.push("↓" + fmtMbps(live.downMbps) + " ↑" + fmtMbps(live.upMbps))
   if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
     parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
-  if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
+  // 0 means the dish does not meter draw (see Panel.qml hasPower): leave it
+  // out of the tooltip rather than reporting a false 0.0 W.
+  if (live.powerW > 0) parts.push(fmtW(live.powerW))
   var alerts = allAlertLabels(status)
   for (var i = 0; i < alerts.length; i++) parts.push("⚠ " + alerts[i])
   var det = String(status.stateDetail || "")
