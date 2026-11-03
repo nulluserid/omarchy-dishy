@@ -11,6 +11,8 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 go mod verify
+bash ./check-licenses.sh
+bash ./test-licenses.sh
 # Fresh code generation + rebuild, without replacing the committed artifact.
 OUTPUT="$work/starlinkd" VERSION="$version" bash ./build.sh
 cmp bin/starlinkd "$work/starlinkd" || { echo "Bundled binary does not match source/toolchain/manifest; rebuild it." >&2; exit 1; }
