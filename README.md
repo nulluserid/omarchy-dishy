@@ -77,6 +77,8 @@ pick up dashboard changes — the shell caches QML until restart.
 
 - A Starlink dish reachable at `192.168.100.1` (default; any router setup that
   lets the Starlink app work also lets Dishy work)
+- A dish that reports power draw (optional; the power block is hidden when
+  every sample is 0 W, since such hardware does not meter draw)
 - Omarchy's shell (Quickshell) — this is a `bar-widget` plugin
 - `systemd` user session for the backend service
 - `notify-send` for notifications (optional; already part of Omarchy)
