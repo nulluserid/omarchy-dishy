@@ -713,7 +713,8 @@ Panel {
             Text {
               width: (parent.width - 2 * parent.spacing) * 0.40
               text: root.hasData && s.usage
-                ? "ALL-TIME ↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB)
+                ? "ALL-TIME ↓ " + Model.fmtGB(Model.lifetimeGB(s.usage.allTimeDownGB, s.usage.downGB))
+                  + " ↑ " + Model.fmtGB(Model.lifetimeGB(s.usage.allTimeUpGB, s.usage.upGB))
                 : ""
               textFormat: Text.PlainText
               elide: Text.ElideRight
