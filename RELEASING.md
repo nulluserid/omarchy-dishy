@@ -21,9 +21,15 @@ Prepare the release tree on the feature branch before merge:
    version in go.mod when it changes). Builds no longer run `go mod tidy` or
    silently change dependencies. Commit deliberate dependency changes separately
    from running the build.
-3. Run the gate below on the final release tree, pass exact-diff review, then
+3. When a compiler or linked dependency changes, review its upstream license and
+   notices, update the reviewed inventory in `backend/check-licenses.sh`, then run
+   `bash backend/check-licenses.sh --write` with the exact build compiler. Commit
+   `backend/THIRD_PARTY_NOTICES.txt` alongside the binary, including upstream
+   copyright/NOTICE texts (not just dependency names). Retain these notices when
+   distributing the executable separately from the plugin checkout.
+4. Run the gate below on the final release tree, pass exact-diff review, then
    commit/push and merge the PR only after its CI gate passes.
-4. On `main`, run the gate again at the merged SHA, tag annotated `vX.Y.Z`,
+5. On `main`, run the gate again at the merged SHA, tag annotated `vX.Y.Z`,
    push the tag, and publish the GitHub release with notes. The manifest,
    executable stamp, and tag must identify the same version.
 
@@ -42,7 +48,8 @@ omarchy plugin validate .
 The script regenerates ignored protobuf stubs, verifies module checksums and
 tidiness, checks formatting, runs race tests/vet, compares a clean deterministic
 rebuild to the **committed** executable, checks its compiler/static-build metadata
-and manifest stamp, and scans **both source and binary** against the live Go
+and manifest stamp, verifies bundled third-party texts against a reviewed linked
+component/toolchain inventory and the exact upstream files, and scans **both source and binary** against the live Go
 vulnerability database. Scanner errors and findings fail the gate; text mode is
 intentional because JSON/SARIF output does not fail on findings. An offline
 `GOVULNDB=file:///...` snapshot is for isolated local verification only, not a

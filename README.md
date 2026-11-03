@@ -179,4 +179,7 @@ the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Dishy's own code is MIT-licensed — see [LICENSE](LICENSE). The bundled
+`starlinkd` executable also includes third-party components under their own
+terms; their licenses, copyright notices, and patent grants are included in
+[`backend/THIRD_PARTY_NOTICES.txt`](backend/THIRD_PARTY_NOTICES.txt).
