@@ -10,13 +10,17 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	grpcstatus "google.golang.org/grpc/status"
 
 	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
 
-// dial connects to the dish. The connection is lazy; failures surface per RPC.
+// dial connects to the dish. The connection is lazy; failures surface per
+// RPC. Client keepalive pings retest a transport that has been quiet longer
+// than any healthy cadence gap, so a silently stalled HTTP/2 session is
+// reaped and re-dialed instead of timing out every RPC forever.
 func dial(target string) (*grpc.ClientConn, error) {
 	var err error
 	target, err = normalizeTarget(target)
@@ -25,7 +29,13 @@ func dial(target string) (*grpc.ClientConn, error) {
 	}
 	// Treat even resolver-named hosts ("unix:9200", "dns:9200") as TCP
 	// host:port, not opaque gRPC resolver URIs.
-	return grpc.NewClient("dns:///"+target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	return grpc.NewClient("dns:///"+target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                keepalivePingInterval,
+			Timeout:             keepalivePongTimeout,
+			PermitWithoutStream: true, // stalls happen between ticks, with no stream open
+		}))
 }
 
 func rpcErr(err error) string {
@@ -131,15 +141,16 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// persist for dishSwitchDebounceTicks consecutive good ticks first: a
 	// hostile endpoint rotating ids per tick then never creates partitions.
 	if id := s.GetDeviceInfo().GetId(); id != "" {
+		hw := s.GetDeviceInfo().GetHardwareVersion()
 		switch {
 		case d.dishID == "":
-			d.switchDish(now, id) // first sighting adopts immediately
+			d.switchDish(now, id, hw) // first sighting adopts immediately
 		case id == d.dishID:
 			d.pendingID, d.pendingIDTicks = "", 0
 		case id == d.pendingID:
 			d.pendingIDTicks++
 			if d.pendingIDTicks >= dishSwitchDebounceTicks {
-				d.switchDish(now, id)
+				d.switchDish(now, id, hw)
 			} else {
 				d.publishPendingTick(now, s)
 				return

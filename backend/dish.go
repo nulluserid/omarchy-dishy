@@ -16,6 +16,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -87,7 +88,9 @@ func (d *daemon) adoptLastDish(now time.Time) {
 // switchDish moves all dish-derived accumulated state to the partition of
 // the dish that just answered with a different identity. Runs only from the
 // tick loop, so the swap is race-free with in-flight RPCs. A first sighting
-// switches too: stats live in partitions from the very first tick.
+// switches too: stats live in partitions from the very first tick. An open
+// outage closes here (see below) — announced as a dish-switch recovery, not
+// the old dish's "online".
 //
 // Reset on switch: the history ring and ingest cursor (the new dish's ring
 // is consumed fresh), the usage epoch (its pre-switch ring bytes are not
@@ -95,16 +98,24 @@ func (d *daemon) adoptLastDish(now time.Time) {
 // state (the new dish re-primes alerts/outages quietly on its first ONLINE),
 // obstruction hysteresis, and the map. geo/link/route state is network-level
 // and keeps its own change detection.
-func (d *daemon) switchDish(now time.Time, id string) {
+func (d *daemon) switchDish(now time.Time, id, hw string) {
 	old := d.dishID
 	if d.day.dirty || d.day.minute >= 0 {
 		d.persistDay(now, true) // final write into the outgoing partition
 	}
 	if d.openOutage != nil {
 		cause, started := d.openOutage.cause, d.openOutage.start
-		d.openOutage = nil // silent event: the outage belonged to the old watch
+		d.openOutage = nil // the outage belonged to the old dish's watch
+		durS := now.Unix() - started
+		// The old dish never returned, so this is not its plain "online"
+		// note — but its outage-start notification was heard, and silence
+		// on recovery reads as a widget stuck offline while the new dish
+		// serves fine (observed 2026-11-16). Announce the recovery by
+		// name instead.
 		d.emit(event{Type: "outage_end", Cause: cause + " (dish switched)",
-			DurS: now.Unix() - started}, "", "")
+			DurS: durS},
+			"Starlink online (dish switched)",
+			fmt.Sprintf("down %dm %ds — now on %s", durS/60, durS%60, dishLabel(id, hw)))
 	}
 	d.emit(event{Type: "dish_switch", From: old, To: id}, "", "")
 
@@ -150,6 +161,19 @@ func (d *daemon) switchDish(now time.Time, id string) {
 		d.vlog("write %s: %v", configName, err)
 	}
 	d.vlog("dish switch: %q -> %q (partition %s)", old, id, dishDirName(id))
+}
+
+// dishLabel names a dish in notifications: the hardware string the panel
+// shows (e.g. "mini1_panda_prod1"), or the id's leading short form when the
+// dish did not report one.
+func dishLabel(id, hw string) string {
+	if hw != "" {
+		return hw
+	}
+	if short, _, ok := strings.Cut(id, "-"); ok && short != "" {
+		return short
+	}
+	return id
 }
 
 // tidyDishes is the retention sweep: a dish partition with no connection

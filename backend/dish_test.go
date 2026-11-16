@@ -135,12 +135,14 @@ func TestDishSwitchPartitionsKeepStats(t *testing.T) {
 func TestDishSwitchResetsWatchState(t *testing.T) {
 	dir := t.TempDir()
 	sent := 0
+	var summary, body string
 	realSend := notifySend
-	notifySend = func(string, string) error { sent++; return nil }
+	notifySend = func(s, b string) error { sent++; summary, body = s, b; return nil }
 	defer func() { notifySend = realSend }()
 
 	c := mkStub()
 	c.status = statusWithID("ut-bbb")
+	c.status.DeviceInfo.HardwareVersion = "mini1_panda_prod1"
 	c.status.Alerts = &dish.DishAlerts{MotorsStuck: true}
 	d := newDaemon(config{
 		interval: 2 * time.Second, idleInterval: 10 * time.Second,
@@ -151,7 +153,7 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	// State left over from watching a previous dish.
 	d.warm = true
 	d.prevAlerts = map[string]bool{"old_alert": true}
-	d.openOutage = &outageTrack{cause: "OFFLINE", start: t0.Unix()}
+	d.openOutage = &outageTrack{cause: "OFFLINE", start: t0.Add(-95 * time.Second).Unix()}
 	d.maxDishOutageStart = t0.Unix() - 60
 	d.hyst.fired = true
 	d.mapData = &obsMap{Rows: 1, Cols: 1}
@@ -175,8 +177,13 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	if d.prevAlerts["motors_stuck"] != true || len(d.prevAlerts) != 1 {
 		t.Errorf("prevAlerts = %v, want silently re-primed to the new dish's alerts", d.prevAlerts)
 	}
-	if sent != 0 {
-		t.Errorf("switch sent %d notifications, want 0 (events only)", sent)
+	// The old dish never came back, but its outage-start note was heard:
+	// recovery via switch announces itself by name instead of silence.
+	if sent != 1 || summary != "Starlink online (dish switched)" {
+		t.Errorf("switch notifications = %d (%q), want exactly the switch recovery note", sent, summary)
+	}
+	if want := "down 1m 35s — now on mini1_panda_prod1"; body != want {
+		t.Errorf("switch notification body = %q, want %q", body, want)
 	}
 	ev := readFile(t, filepath.Join(dir, "events.jsonl"))
 	if !strings.Contains(ev, `"cause":"OFFLINE (dish switched)"`) {
@@ -187,6 +194,20 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	}
 	if strings.Contains(ev, `"type":"alert_set"`) {
 		t.Fatal("switch fired alert_set for the new dish's pre-existing alert")
+	}
+
+	// A switch with no outage open stays silent: healthy dishes trading
+	// places (two good networks, machine moved between them) is not a
+	// recovery, so it must not re-announce. Debounce: first differing
+	// answer only pends, the second switches.
+	c.status = statusWithID("ut-ccc")
+	d.goodTick(t0.Add(2*time.Second), c.status, false, true, 2*time.Second)
+	d.goodTick(t0.Add(4*time.Second), c.status, false, true, 2*time.Second)
+	if d.dishID != "ut-ccc" {
+		t.Fatalf("dishID = %q after debounced answers, want ut-ccc", d.dishID)
+	}
+	if sent != 1 {
+		t.Errorf("healthy switch sent %d notifications, want still 1", sent)
 	}
 }
 
