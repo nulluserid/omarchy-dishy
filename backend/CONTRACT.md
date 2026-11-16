@@ -205,8 +205,12 @@ samples only, so its `n` reflects the shorter window.
 ```
 Types: outage_start, outage_end, alert_set, alert_cleared, obstruction_heavy,
 state_change, dish_switch (v4: `{"type":"dish_switch","from":"<old dish id>",
-"to":"<new dish id>"}` — emitted when a different dish answers; event-only,
-never notified). `obstruction_heavy` hysteresis: fire at fraction >0.01 sustained
+"to":"<new dish id>"}` — emitted when a different dish answers; the event
+itself is silent, but an open outage it closes ends with cause
+`"<cause> (dish switched)"` and is announced as "Starlink online (dish
+switched)" — the old dish never returned, yet its offline note was heard, so
+the recovery names the dish that took over). `obstruction_heavy` hysteresis:
+fire at fraction >0.01 sustained
 60s; re-arm only after <0.005 for 300s.
 
 ## Notifications (notify-send, app-name "Dishy")
@@ -215,6 +219,7 @@ never notified). `obstruction_heavy` hysteresis: fire at fraction >0.01 sustaine
 |--------------------|----------------------|-----------------------------|---------|
 | outage_start       | Starlink offline     | cause, humanized            | normal  |
 | outage_end         | Starlink online      | "down Xm Ys"                | normal  |
+| outage_end (switch)| Starlink online (dish switched) | "down Xm Ys — now on <hw or short id>" | normal |
 | alert_set          | Starlink alert       | label                       | normal  |
 | obstruction_heavy  | Starlink obstructed  | "X.X% obstruction, last 60s"| normal  |
 

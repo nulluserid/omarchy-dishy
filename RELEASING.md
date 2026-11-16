@@ -17,7 +17,7 @@ Prepare the release tree on the feature branch before merge:
 2. Rebuild the committed binary for **every versioned release**, including
    QML-only releases: `backend/build.sh`. The default stamp is the manifest
    version, not the previous Git tag. The exact compiler in `backend/go.mod`
-   is required; if needed select it with `GOTOOLCHAIN=go1.27.3` (use the
+   is required; if needed select it with `GOTOOLCHAIN=go1.27.4` (use the
    version in go.mod when it changes). Builds no longer run `go mod tidy` or
    silently change dependencies. Commit deliberate dependency changes separately
    from running the build.

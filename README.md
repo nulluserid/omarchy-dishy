@@ -67,7 +67,9 @@ pick up dashboard changes — the shell caches QML until restart.
   30-day retention as the active one. Old ≤ v1.2 top-level
   `daily.json`/`day-*.json` files are legacy (and may mix dishes); they
   share the 30-day retention and are safe to delete.
-- **Notifications:** desktop notification when an outage starts and ends, when
+- **Notifications:** desktop notification when an outage starts and ends —
+  including an outage that ends because a *different* dish took over, which
+  announces "Starlink online (dish switched)" naming the new dish — when
   a dish alert sets, and on sustained heavy obstruction. Notifications fire on
   transitions; a dish that is already unreachable when the daemon starts stays
   quiet on purpose — and (1.1) they never fire for a machine parked on another

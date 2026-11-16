@@ -16,7 +16,7 @@ fail() { echo "License check: $*" >&2; exit 1; }
 
 # A dependency/toolchain change requires reviewing its terms, not just accepting
 # whatever LICENSE happens to exist. Include optional AUTHORS/PATENTS verbatim.
-compiler=go1.27.3
+compiler=go1.27.4
 components=(
     'golang.org/x/net|v0.62.0|LICENSE PATENTS'
     'golang.org/x/sys|v0.49.0|LICENSE PATENTS'

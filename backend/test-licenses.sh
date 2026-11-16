@@ -55,7 +55,7 @@ reset_fixture
 printf '\t=>\texample.com/replacement\tv1.0.0\th1:test\n' >> "$work/metadata"
 reject 'module replacement' 'Module replacements require notice review'
 reset_fixture
-sed -i '1s/go1.27.3/go1.27.2/' "$work/metadata"
+sed -i '1s/go1.27.4/go1.27.2/' "$work/metadata"
 reject 'different bundled compiler' 'Binary compiler differs'
 reset_fixture
 dir=$("$REAL_GO" list -m -f '{{.Dir}}' google.golang.org/grpc)

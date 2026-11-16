@@ -16,6 +16,16 @@ const (
 	sampleIntervalS = 1
 	rpcTimeout      = 3 * time.Second // per RPC; dish may vanish mid-tick
 
+	// Client keepalive on the dish connection (dial): ping a transport
+	// quiet for this long, reap it if the pong misses. 20 s exceeds the
+	// slowest healthy cadence gap (10 s idle ticks), so pings fire only
+	// when the session has genuinely gone quiet — e.g. ESTABLISHED at the
+	// kernel level while its HTTP/2 layer silently stalls (observed
+	// 2026-11-16: every RPC timed out on a socket whose TCP keepalives
+	// were still ACKed) — and the forced re-dial lands on a live dish.
+	keepalivePingInterval = 20 * time.Second
+	keepalivePongTimeout  = 10 * time.Second
+
 	// Link/panel dynamics (CONTRACT.md "Link state & marker").
 	linkGraceWindow = 10 * time.Minute // hide delay once evidence stops
 	probeWindow     = 30 * time.Second // fast-poll burst after a failure or route change
