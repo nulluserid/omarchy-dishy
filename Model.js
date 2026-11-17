@@ -127,6 +127,17 @@ function fmtPct(v, decimals) {
   return n === null ? "—" : n.toFixed(decimals === undefined ? 1 : decimals) + "%"
 }
 
+// Mean of the non-null entries (null when there is no data): window summary
+// for the trailing-24h chart, where a gap means "no active traffic", not zero.
+function mean(values) {
+  var sum = 0, n = 0
+  if (values) for (var i = 0; i < values.length; i++) {
+    var v = num(values[i])
+    if (v !== null) { sum += v; n++ }
+  }
+  return n ? sum / n : null
+}
+
 // Nearest-rank percentile over non-null entries; null when no data.
 function percentile(values, p) {
   var vals = []
@@ -156,6 +167,27 @@ function decimate(values, buckets) {
       if (n !== null) { sum += n; count++ }
     }
     out.push(count ? sum / count : null)
+  }
+  return out
+}
+
+// Trailing 24 h of per-minute typical downlink, oldest → newest, as a fixed
+// 1440-slot window: yesterday's minutes (cur+1 … 1439) then today's (0 … cur).
+// A day file stores {} for minutes with no data (backend dayMinute), which maps
+// to a null gap. The window length is constant so the x-axis is time rather
+// than "however much we have collected" — a fresh install just has gaps on the
+// left, and the midnight roll no longer blanks the whole plot.
+function rolling24h(prevMinutes, todayMinutes, curMinute) {
+  var out = []
+  var cur = num(curMinute, 0)
+  var i, m
+  for (i = cur + 1; i < 1440; i++) {
+    m = prevMinutes ? prevMinutes[i] : null
+    out.push(m && num(m.downTyp) ? num(m.downTyp) : null)
+  }
+  for (i = 0; i <= cur; i++) {
+    m = todayMinutes ? todayMinutes[i] : null
+    out.push(m && num(m.downTyp) ? num(m.downTyp) : null)
   }
   return out
 }
