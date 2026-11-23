@@ -334,7 +334,9 @@ the state directory for every caller — the daemon, `set host`, the one-shot
 controls, the widget's CLI calls, the demo harness; empty means unset, and a
 relative value is rejected rather than falling back to the real state
 directory (the daemon and `set host` exit 1 with the reason; the one-shot
-controls then skip config.json). The QML consumers see only the shell's
+controls then skip config.json). An existing directory keeps its mode — the
+override never chmods it — and the state files inside are still written
+0600. The QML consumers see only the shell's
 environment, so at every daemon start — never for `-once` or the CLI
 subcommands — the daemon publishes the directory it resolved, this one
 included, as the symlink `$XDG_RUNTIME_DIR/starlinkd` → that directory's
@@ -486,7 +488,8 @@ descriptor — a symlink there is refused, never followed; the files the daemon
 loads are read capped — config.json 4 KiB, daily.json 16 KiB, day-*.json
 256 KiB — and a larger one is treated exactly like a corrupt one; the
 dishes/ root and a partition directory are 0700 when created, adopted or
-switched to, state files are 0600 and the state root 0700, and no other
+switched to, state files are 0600 and the default state root 0700 (a
+`STARLINKD_STATE_DIR` directory keeps its mode), and no other
 historical file or directory mode is rewritten. The state dir is published
 as `$XDG_RUNTIME_DIR/starlinkd` only into a runtime dir that exists, is
 owned by the daemon's uid and is not writable by group/others.

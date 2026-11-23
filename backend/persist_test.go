@@ -179,6 +179,35 @@ func TestUpgradeStatePermissions(t *testing.T) {
 	if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		t.Fatalf("events.jsonl = %v, %v; the planted symlink should be left in place", fi, err)
 	}
+
+	// STARLINKD_STATE_DIR is the user's choice, so an existing directory
+	// keeps its mode — unlike the default path at the top of this test,
+	// which is tightened on purpose. What it holds is protected all the
+	// same: every file is written 0600 whatever the directory's mode.
+	chosen := filepath.Join(t.TempDir(), "chosen")
+	if err := os.Mkdir(chosen, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(chosen, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STARLINKD_STATE_DIR", chosen)
+	if got, err := stateDir(); err != nil || got != chosen {
+		t.Fatalf("stateDir with the override = %q, %v", got, err)
+	}
+	assertMode(t, chosen, 0o755)
+	if err := writeTargetConfig(chosen, "192.168.100.1:9200"); err != nil {
+		t.Fatal(err)
+	}
+	assertMode(t, filepath.Join(chosen, "config.json"), 0o600)
+	// A directory the override has to create is still 0700.
+	created := filepath.Join(t.TempDir(), "missing", "state")
+	t.Setenv("STARLINKD_STATE_DIR", created)
+	if got, err := stateDir(); err != nil || got != created {
+		t.Fatalf("stateDir creating the override = %q, %v", got, err)
+	}
+	assertMode(t, created, 0o700)
+	t.Setenv("STARLINKD_STATE_DIR", "")
 }
 
 func TestAppendEventRotation(t *testing.T) {
