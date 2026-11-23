@@ -6,9 +6,10 @@ import qs.Ui
 import "Model.js" as Model
 
 // Bar readout (state dot + latency/down/icon) and host for the dashboard panel.
-// Reads ONLY the daemon's status.json (CONTRACT.md), from the daemon's state
-// dir: $XDG_STATE_HOME/starlinkd (default ~/.local/state/starlinkd) until the
-// daemon's $XDG_RUNTIME_DIR/starlinkd symlink is seen, then that.
+// Reads ONLY the daemon's status.json (CONTRACT.md), from whichever of its two
+// possible state dirs answers: the $XDG_RUNTIME_DIR/starlinkd symlink it
+// publishes at start, or $XDG_STATE_HOME/starlinkd (default
+// ~/.local/state/starlinkd). Decided per tick (Model.pickSource, in tick()).
 BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
@@ -18,10 +19,18 @@ BarWidget {
   // The daemon honors XDG_STATE_HOME: a service on another state dir updates
   // fine while a hardcoded ~/.local/state path shows nothing. It also
   // publishes its real state dir as a symlink at $XDG_RUNTIME_DIR/starlinkd
-  // at start; the probe below flips `linked` once that file answers.
-  property bool linked: false
-  readonly property string stateDir: root.linked ? Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR"))
-    : Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
+  // at start. So there are two places to read it from:
+  readonly property string runtimeStateDir: Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR"))
+  readonly property string mirrorStateDir: Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
+
+  // ...and `source` is the one in use. Each tick reads it; when its status is
+  // missing or stale it reads the other once and moves there if that one is
+  // fresh — so the bar follows the daemon both ways (one that starts later,
+  // runs on another state dir, or moves back) with no shell restart, and
+  // shows the new data in the same tick. stateDir follows `source`, and with
+  // it everything bound to stateDir.
+  property string source: Model.SOURCE_MIRROR
+  readonly property string stateDir: root.source === Model.SOURCE_RUNTIME ? root.runtimeStateDir : root.mirrorStateDir
 
   // Parsed status.json (null = missing/corrupt/oversize) and 30s staleness flag.
   // (Not named `data`: that would shadow Item.data.)
@@ -99,31 +108,46 @@ BarWidget {
   readonly property string label: root.glyph + (root.value !== "" ? " " + root.value : "")
 
   function tick() {
-    var parsed = null
+    var nowS = Date.now() / 1000
+    var pick = Model.pickSource(root.source, root.readStatus, nowS, root.runtimeStateDir !== "")
+    root.applyPick(pick)
+    root.statusData = pick.status
+    root.stale = Model.isStale(pick.status, nowS)
+    root.nowS = nowS
+    root.noteTypical(pick.status)
+    root.pushHostSetting()
+  }
+
+  // The reader Model.pickSource decides over: one bounded read, of the file as
+  // it is now (the readers below never serve a previous read).
+  function readStatus(source) {
+    var file = source === Model.SOURCE_RUNTIME ? runStatus : mirrorStatus
     try {
-      statusFile.reload()
+      file.reload()
       // Bounded: this runs on every tick, so a status.json past the
       // daemon's contract size is dropped as unreadable, never parsed.
-      parsed = Model.parseBounded(statusFile.text(), Model.MAX_STATUS_CHARS)
+      return Model.parseBounded(file.text(), Model.MAX_STATUS_CHARS)
     } catch (e) {
-      parsed = null
+      return null
     }
-    root.statusData = parsed
-    root.stale = Model.isStale(parsed, Date.now() / 1000)
-    if (root.stale) root.refreshStateDir() // missing counts as stale
-    root.nowS = Date.now() / 1000
-    root.noteTypical(parsed)
-    root.pushHostSetting()
+  }
+
+  // Takes a pickSource() result's source. A switch rebinds stateDir, and with
+  // it config.json, so the applied host is re-seeded from the new path.
+  function applyPick(pick) {
+    if (!pick.switched) return
+    root.source = pick.source
+    root.seedAppliedHost()
   }
 
   // ---- dishHost setting → starlinkd ----
   // The manifest's dishHost setting is pushed to the daemon when it differs
   // from the persisted config target (read at start, and again when the state
-  // dir switches): a live `set host`
-  // swap if the daemon runs, else config.json for the next start. Edits are
-  // debounced (1.5 s stable) so typing prefixes never become live swaps, and
-  // the daemon re-validates — a rejected value is remembered (no retry loop)
-  // until the setting changes again.
+  // dir switches): a live `set host` swap if the daemon runs, else
+  // config.json for the next start. Edits are debounced (1.5 s stable) so
+  // typing prefixes never become live swaps, and the daemon re-validates — a
+  // rejected value is remembered (no retry loop) until the setting changes
+  // again.
   readonly property string binPath: decodeURIComponent(
     Qt.resolvedUrl("backend/bin/starlinkd").toString().replace(/^file:\/\//, ""))
   property string appliedHost: ""
@@ -181,24 +205,23 @@ BarWidget {
     } catch (e) { }
   }
 
-  // State dir probe: one small read, only while unlinked, so it can ride the
-  // tick — a daemon that starts after the shell, or runs on another state
-  // dir, is picked up without a shell restart.
-  function refreshStateDir() {
-    if (root.linked || Quickshell.env("XDG_RUNTIME_DIR") === "") return
+  // Startup probe: start on the daemon's own dir whenever it has published
+  // one (Model.startSource) — the seed below then reads the config.json that
+  // daemon actually uses — and let the ticks sort out freshness from there.
+  function probeStateDir() {
+    if (root.runtimeStateDir === "") return
+    var published = false
     try {
-      linkProbe.reload()
-      if (linkProbe.text() !== "") {
-        root.linked = true
-        root.seedAppliedHost()
-      }
+      runStatus.reload()
+      published = runStatus.text() !== ""
     } catch (e) { }
+    root.source = Model.startSource(published)
   }
 
   Component.onCompleted: {
     // Resolve the state dir first: the seed must read the config.json at
     // the path the widget ends up on.
-    root.refreshStateDir()
+    root.probeStateDir()
     root.seedAppliedHost()
   }
 
@@ -235,15 +258,26 @@ BarWidget {
     onTriggered: root.tick()
   }
 
-  FileView { id: statusFile; path: root.stateDir + "/status.json"; blockLoading: true }
-
-  // The probe's "not found" is the normal state until the updated daemon has
-  // run this session, so it is not logged (the other FileViews' failures are).
+  // One status reader per source, read straight from disk when asked. With
+  // preload off and blockAllReads on, a reload()+text() pair is a single
+  // synchronous read of the ~1KB file — no thread-pool hop per tick — and it
+  // is always the file as it is now. Plain blockLoading keeps serving the
+  // previous read until an async one lands: that put the bar one tick behind
+  // and would make the freshness choice on stale text.
   FileView {
-    id: linkProbe
-    path: Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR")) + "/status.json"
-    blockLoading: true
+    id: runStatus
+    path: root.runtimeStateDir + "/status.json"
+    preload: false
+    blockAllReads: true
+    // Its "not found" is the normal state until the updated daemon has run
+    // this session, so it is not logged.
     printErrors: false
+  }
+  FileView {
+    id: mirrorStatus
+    path: root.mirrorStateDir + "/status.json"
+    preload: false
+    blockAllReads: true
   }
 
   Loader {

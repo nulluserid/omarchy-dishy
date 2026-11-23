@@ -316,6 +316,46 @@ function linkedStateDirFor(xdgRuntimeDir) {
   return xdgRuntimeDir ? xdgRuntimeDir + "/starlinkd" : ""
 }
 
+// The two sources the daemon's state can be read from: the runtime symlink
+// above, and the XDG_STATE_HOME mirror (stateDirFor).
+var SOURCE_RUNTIME = "runtime"
+var SOURCE_MIRROR = "mirror"
+
+// The source to start on: the daemon's own dir whenever it has published one
+// (hasRuntimeStatus: its status.json is there) — fresh or not, that is where
+// its config.json lives — else the mirror. The ticks take freshness from
+// there.
+function startSource(hasRuntimeStatus) {
+  return hasRuntimeStatus ? SOURCE_RUNTIME : SOURCE_MIRROR
+}
+
+// One tick's choice of source, as a pure decision over an injected reader.
+// read(source) returns the status parsed from that source — null when
+// missing — as the file is NOW; a reader that throws reads as missing. The
+// current source is always read. Only when its status is missing or stale is
+// the other one read, once, and taken only when it is fresh: that read is
+// then the new source's first, so its data shows in this same tick rather
+// than one later, with no third read. When neither is fresh the widget stays
+// where it is, on the stale styling it already has. With hasRuntime false
+// there is no other source to fall over to. Returns { source, status,
+// switched, reads }.
+function pickSource(current, read, nowS, hasRuntime) {
+  var status = null
+  try { status = read(current) } catch (e) { status = null }
+  var result = { source: current, status: status, switched: false, reads: 1 }
+  if (!hasRuntime || !isStale(status, nowS)) return result
+  var other = current === SOURCE_RUNTIME ? SOURCE_MIRROR : SOURCE_RUNTIME
+  var otherStatus = null
+  try { otherStatus = read(other) } catch (e) { otherStatus = null }
+  result.reads = 2
+  if (!isStale(otherStatus, nowS)) {
+    result.source = other
+    result.status = otherStatus
+    result.switched = true
+  }
+  return result
+}
+
 // One-line bar tooltip summary: state + live numbers + every active alert
 // and the software-update state, so a glance at the tooltip never misses
 // what the dish is telling us.
