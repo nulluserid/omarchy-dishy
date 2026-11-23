@@ -1,4 +1,4 @@
-# starlinkd ⇄ plugin contract (v4)
+# starlinkd ⇄ plugin contract (v5)
 
 Ground truth: live Starlink Mini, hw `mini1_panda_prod1`, fw `2026.09.08.mr86422`,
 API v43, gRPC `192.168.100.1:9200`, service `SpaceX.API.Device.Device/Handle`.
@@ -40,18 +40,22 @@ partitions roll their day files through the same 30-day window (see
 day-*.json), and legacy root-level day files share it. No configuration;
 the window is the day-history retention.
 
-Amendment (2026-11-23, marketplace review of v1.6.0): the obstruction map is
-bounded at the dish trust boundary — a coherent grid of at most 256x256
-cells and 1 MiB per reply ("Security hardening") — because the shell
-re-parses hist.json every 2 s while the dashboard is open. Strings the dish
-and the egress provider send are clipped to rune caps, and the dish-reported
-outage list is bounded at ingestion (same section). Every notification draws
-from one rate bucket ("Notifications"); the control socket acts only on
-newline-terminated lines and never acknowledges a dropped command ("Panel
-control socket"). The daemon also publishes its resolved state directory as
-the symlink `$XDG_RUNTIME_DIR/starlinkd` ("State directory"), so the QML
-consumers follow a non-default `XDG_STATE_HOME`. status.json gains the
-additive `dish.dir`. No other file shape changes.
+v5 (2026-11-23) amends v4, from the marketplace review of v1.6.0
+(omacom/omarchy-plugin-marketplace#15160) and the audit that followed it.
+All additions are additive or tighten what the daemon emits; consumers of
+the v4 fields work unchanged. The obstruction map is bounded at the dish
+trust boundary: at most 256x256 cells, exactly rows·cols of them, 1 MiB per
+reply. Every string the dish or the egress provider sends is clipped to a
+rune cap. The daemon publishes its state dir as `$XDG_RUNTIME_DIR/starlinkd`,
+and `STARLINKD_STATE_DIR` overrides that dir for every caller. status.json
+gains `dish.dir`, the partition being written. Every notification draws from
+one token bucket. The control socket gains the `alive` liveness command and a
+strict line protocol. `-idle-exit` ties the daemon's lifetime to the widget,
+and `-geo-url` overrides the egress endpoint for the demo harness. The egress
+lookup runs on a settled clock with a failure backoff and dials IPv4 only.
+`notify-send` is resolved once, to a trusted absolute path. State-dir writes
+and loads are hardened. The failure-probe re-arm is bounded. The sections
+below carry each rule; "Security hardening" holds the full set.
 
 The daemon writes these files, all atomic (tmp+rename), dir
 `~/.local/state/starlinkd/` by default (see "State directory"; v4: daily.json
@@ -92,6 +96,12 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
   (no OBSTRUCTED state — this firmware reports no live obstruction flag)
 - `stateDetail`: `SOFTWARE_UPDATE_REBOOT_PENDING` | disablementCode when ≠ OKAY | `""`
 - `dish.dir`: name of the per-dish partition actually being written (`dishes/<dir>/`), derived from the adopted `dish.id` — never from an id that is only pending in the identity debounce, and absent until an identity is known (the state root is written then). Consumers use it instead of re-deriving the name: the daemon's rule (lowercase, [a-z0-9._-], 64 bytes) and a re-implementation disagree on non-ASCII ids.
+- Clipping (v5): `dish.id`, `hw` and `sw` are cut to 64 runes and `error` to
+  200; `geo.ip` to 64, `geo.city`/`region`/`org` to 128, `geo.country` to 16,
+  `geo.asn` to 32. Control characters (Unicode Cc), format characters (Cf)
+  and invalid UTF-8 are dropped from every dish- and egress-derived string
+  before the cap counts. The same clipped strings are what reach config.json,
+  events.jsonl and notifications ("Security hardening").
 - `ts` staleness: consumers treat data older than 30s as NO_DATA (28s of
   headroom on the 10 s idle cadence; the bar timer runs at 10 s while hidden).
 - `live.typicalDownMbps` (v3): last minute's typical ACTIVE downlink — samples
@@ -115,16 +125,24 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
   flip; `lastDishOK` = unix s of the last successful GetStatus. Missing
   `link` block (v1 daemon): consumers must default to visible.
 - `geo` (v2, omitted until the first lookup): egress info from
-  `https://ifconfig.co/json` — public IP, approximate exit city/region/country,
-  carrier (`asn`, `asn_org`), and `isStarlink` (AS14593 or SpaceX/Starlink org
-  string). Refresh: 5 min settled on-network (with the dashboard open, forced
-  on open + every heartbeat whenever the answer is over 60 s old — so at most
-  ≈1/min, the provider's courtesy limit), 1 min while classifying (dish
-  unreachable or default route flipped; once a post-flip lookup is consumed,
-  follow-ups return to the settled 5-min clock). No API key. Lookups run off
-  the tick path, and results are stamped when the request is launched — the
-  answer describes the network as of then, so a lookup in flight during a
-  route change can never pass for a post-change answer.
+  `https://ifconfig.co/json` (`-geo-url` overrides the endpoint) — public IP,
+  approximate exit city/region/country, carrier (`asn`, `asn_org`), and
+  `isStarlink` (AS14593 or SpaceX/Starlink org string). Refresh: 5 min
+  settled (with the dashboard open, forced on open + every heartbeat whenever
+  the answer is over 60 s old — so at most ≈1/min, the provider's courtesy
+  limit), 1 min only while classifying — no fresh geo answer yet (daemon
+  start, or the last one older than the 10-minute grace window) or right
+  after a default-route flip. Once a lookup is consumed the settled 5-min
+  clock applies off-network too: a machine parked on another carrier (fresh
+  `egress-other`) is asked every 5 min, not every minute. After a failed
+  lookup nothing is retried for 5 min, except that a default-route flip still
+  looks up on the next tick; the next success ends the backoff. The egress
+  lookup dials IPv4 only, so the address and exit location shown are the IPv4
+  ones; with no IPv4 route the lookup fails and there is no egress line. No
+  API key. Lookups run off the tick path, and results are stamped when the
+  request is launched — the answer describes the network as of then, so a
+  lookup in flight during a route change can never pass for a post-change
+  answer.
 
 ## hist.json — ~60KB with a real dish's 123x123 map (map ~41KB, ring ~21KB),
 ## written ONLY on active (dashboard-open) ticks; the background cadence
@@ -155,6 +173,13 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
 ```
 
 All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
+
+- `map` (v5): rows and cols each 1..256, exactly rows·cols cells, each a
+  finite raw value that rounds into [-1, 1] (0..1 per cell, -1 = no data).
+  Anything else refuses the map whole, logged once per distinct reason; the
+  DishGetObstructionMap reply is capped at 1 MiB per call. Refreshed every
+  60 s while the dashboard is open; a refused or failed attempt also waits
+  60 s, and the last accepted map is kept.
 
 ## daily.json — every tick. Persisted across restarts. Dish-scoped (v4):
 ## lives in `dishes/<dish-id>/` under the state dir, one per dish.
@@ -268,6 +293,15 @@ every few ticks), so a gate per source never adds up to a bound. A
 notification the bucket cannot pay for is dropped; its event is still
 appended to events.jsonl.
 
+Trust (v5): `notify-send` is resolved once at daemon start (`exec.LookPath` →
+absolute path → `stat`) and accepted only as a regular file owned by root or
+the daemon's user with no group/other write bits. A refusal disables
+notifications for the run and is reported once at startup on stderr as
+`starlinkd: notifications disabled: <reason>` (journald under systemd — no
+`-v` needed); a successful resolution is logged only with `-v`. The helper
+is never resolved from PATH at notification time, and with no trusted path
+stored nothing is spawned. `-once` and the CLI subcommands never resolve it.
+
 ## CLI controls (dial-on-demand, then exit)
 
 `starlinkd stow|unstow|reboot [-t 192.168.100.1:9200]` — exit 0 on success,
@@ -293,11 +327,17 @@ exits 2 with its usage line on any mode it does not know.
 
 ## State directory
 
-The daemon resolves its state dir as `$XDG_STATE_HOME/starlinkd`, else
-`~/.local/state/starlinkd` when `XDG_STATE_HOME` is unset. The QML consumers
-see only the shell's environment, so at every daemon start — never for
-`-once` or the CLI subcommands — the daemon publishes the directory it
-resolved as the symlink `$XDG_RUNTIME_DIR/starlinkd` → that directory's
+The daemon resolves its state dir as `STARLINKD_STATE_DIR` when set, else
+`$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd` when
+`XDG_STATE_HOME` is unset. `STARLINKD_STATE_DIR=<absolute path>` overrides
+the state directory for every caller — the daemon, `set host`, the one-shot
+controls, the widget's CLI calls, the demo harness; empty means unset, and a
+relative value is rejected rather than falling back to the real state
+directory (the daemon and `set host` exit 1 with the reason; the one-shot
+controls then skip config.json). The QML consumers see only the shell's
+environment, so at every daemon start — never for `-once` or the CLI
+subcommands — the daemon publishes the directory it resolved, this one
+included, as the symlink `$XDG_RUNTIME_DIR/starlinkd` → that directory's
 absolute path. The link is created under a temp name beside it and renamed
 over the previous one, so consumers never see it missing or half-made. An
 unset `XDG_RUNTIME_DIR` publishes nothing and is not an error; neither does
@@ -308,19 +348,24 @@ logged only in verbose mode, and the consumers fall back. A non-symlink
 occupant of that path (a real directory or file) is never removed or
 replaced: the daemon reports it and keeps running.
 
-Consumers resolve the state dir as: `$XDG_RUNTIME_DIR/starlinkd` when the
-link resolves, else `$XDG_STATE_HOME/starlinkd`, else
-`~/.local/state/starlinkd`. The link is authoritative whenever it resolves —
-it names the directory of the daemon's last start, so a user service
-configured with a different state directory (e.g. an
-`Environment=XDG_STATE_HOME=…` override on the unit) still feeds the widget
-and panel.
+Consumers read two candidates — the published symlink, and the mirror
+(`$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd`) — and follow
+the fresher one. The widget starts on the symlink's directory when that holds
+a status.json, else on the mirror; every tick it reads the source in use,
+and only when that status is missing or stale does it read the other once and
+move there if that one is fresh (with neither fresh it stays where it is).
+So a user service configured with a different state directory — a
+`STARLINKD_STATE_DIR` in the unit's environment, or an
+`Environment=XDG_STATE_HOME=…` override on the unit — still feeds the widget
+and panel. The widget hands the state dir it reads to its own CLI calls as
+`STARLINKD_STATE_DIR`.
 
 ## Panel control socket (v2)
 
-`starlinkd panel open|close` — one line (`open\n` / `close\n`) over a Unix
-socket at `$XDG_RUNTIME_DIR/starlinkd.sock` (0600, tmpfs; falls back to the
-state dir). The dashboard QML sends `open` on show (immediate refresh + a
+`starlinkd panel open|close|alive` — one line (`open\n` / `close\n` / `alive\n`)
+over a Unix socket at `$XDG_RUNTIME_DIR/starlinkd.sock` (0600, tmpfs; falls
+back to the state dir). The dashboard QML sends `open` on show (immediate
+refresh + a
 90 s fast-poll lease with a 60 s heartbeat) and `close` on hide (idle
 immediately). (v3) the widget settings also send `set host <target>` through
 the same socket; the listener validates the target and the tick loop applies
@@ -351,78 +396,108 @@ exactly like `open`/`close`, and every control-socket command — `alive`,
 `-idle-exit` (the service unit passes `-idle-exit 15m`) the daemon exits
 cleanly, status 0, once no such command has arrived for that long: the wait
 never sleeps past the deadline, and a daemon started at boot gets one full
-period to hear the first heartbeat. Two widget-side decisions: the service
-is started only at shell load, never on a failed heartbeat — a crash is
-covered by the unit's `Restart=on-failure`, and starting on every failed
-ping would make a deliberately stopped daemon un-stoppable — and the
-timeout is a uniform 15 minutes.
+period to hear the first heartbeat — so a disabled or removed plugin takes
+its backend down within the period. Two widget-side decisions: the service
+is started once at load if nothing answers, never on a later failed
+heartbeat — a crash is covered by the unit's `Restart=on-failure`, and
+starting on every failed ping would make a deliberately stopped daemon
+un-stoppable — and the timeout is a uniform 15 minutes.
 
 ## Daemon flags
 
 `starlinkd [-t 192.168.100.1:9200] [-interval 2s] [-idle-interval 10s]
-[-idle-hist-interval 60s] [-map-interval 60s] [-once] [-v]`
+[-idle-hist-interval 60s] [-map-interval 60s] [-idle-exit <duration>] [-once]
+[-v] [-geo-url https://ifconfig.co/json]`
 - `-interval`: poll cadence while the dashboard is open (default 2 s).
 - `-idle-interval`: poll cadence while it is closed (default 10 s).
 - `-idle-hist-interval`: background history refresh while closed (default 60 s).
 - `-map-interval`: obstruction map refresh (dashboard open only).
 - `-once`: single tick, write files, print status.json to stdout, exit.
 - `-v`: log transitions + errors to stderr (journald under systemd).
-- `-idle-exit`: exit cleanly (status 0) once no control-socket command
-  arrived for this long (default 0 = never; the service unit passes `15m`).
+- `-idle-exit <duration>`: exit cleanly (status 0) once no control-socket
+  command arrived for this long (default 0 = never; the service unit passes
+  `15m`).
+- `-geo-url <url>`: egress lookup endpoint (default
+  `https://ifconfig.co/json`). Must be an absolute http or https URL with a
+  host; anything else exits 2 before anything dials or a state directory is
+  created. The service unit never sets it; the demo harness is its only user.
 
-## Security hardening (2026-10-31)
+## Security hardening (2026-10-31, revised 2026-11-23 for v5)
 
-Response-trust hardening for the unauthenticated dish channel: GetHistory is
-ingested only when **all four** ring arrays are exactly ringSize (short or
-hostile responses are rejected whole); non-finite (NaN/Inf) samples are
-skipped and `round()` neutralizes non-finite floats so no state file can
-carry them (a marshal failure now keeps the last good file instead of writing
-an empty object); obstruction maps (2026-11-23) are accepted only as a
-coherent bounded grid — 1 ≤ rows,cols ≤ 256, exactly rows·cols delivered
-cells, every raw cell finite and, once rounded, in [-1, 1] — and rejected
-whole otherwise, with the reason logged, keeping the last accepted map in
-place while still advancing the refresh clock, as a reply that fails or
-exceeds its 1 MiB per-call cap does (ObsMap.qml additionally refuses
-incoherent grids);
-dish-reported outage starts are accepted only within the freshness window
-(never future-dated) and announcements are rate-limited to one per 60 s,
-with every notification drawing from one shared bucket ("Notifications");
-dish-identity switches are debounced to 2 consecutive identical answers
+The rules the daemon enforces, by boundary.
+
+Dish answers (the endpoint is unauthenticated): GetHistory is ingested only
+when **all four** ring arrays are exactly ringSize (short or hostile responses
+are rejected whole); non-finite (NaN/Inf) samples are skipped and `round()`
+neutralizes non-finite floats so no state file can carry them (a marshal
+failure keeps the last good file instead of writing an empty object);
+history-array values outside int range clamp to a full ring re-read. An
+obstruction map is accepted only as a coherent bounded grid — 1 ≤ rows,cols
+≤ 256, exactly rows·cols delivered cells, every raw cell finite and, once
+rounded, in [-1, 1] — its reply is capped at 1 MiB per call, the refresh
+clock advances on every attempt, and a refusal is logged with its reason and
+keeps the last accepted map (ObsMap.qml additionally refuses incoherent
+grids). Dish-reported outages are kept to the newest 100 by start time;
+their starts are accepted only within the freshness window (never
+future-dated), and announcements are rate-limited to one per 60 s.
+Dish-identity switches are debounced to 2 consecutive identical answers
 (first sighting adopts immediately) and the partition set is capped at 64
-with least-recently-active eviction; the control socket acts only on a
-newline-terminated line of ≤ 512 bytes, acknowledges only a command it
-queued, and keeps accepting after transient failures; state files are mode
-0600 and state directories 0700; history-array values outside int range
-clamp to a full
-ring re-read; the systemd user unit sets NoNewPrivileges/ProtectSystem/
-PrivateTmp/RestrictAddressFamilies/MemoryMax.
+with least-recently-active eviction.
 
-State-dir writes and loads are hardened the same way (2026-11-23): a state
-file is written through a uniquely named temp file in its own directory, so
-nothing planted at a predictable name is opened or followed; events.jsonl is
-opened O_NOFOLLOW and a symlink there is refused, never followed; the files
-the daemon loads are read capped — config.json 4 KiB, daily.json 16 KiB,
-day-*.json 256 KiB — and a larger one is treated exactly like a corrupt one;
-the dishes/ root and a partition directory are 0700 when created, adopted or
-switched to, and no other historical file or directory mode is rewritten.
+Strings: the dish's device id / hardware / software strings, the RPC error
+text and every egress field are the peers' to size, and the bar re-parses
+status.json every 2 s even with the panel closed — so each is clipped, never
+copied whole. The cap is 64 runes for `dish.id`, `hw` and `sw` (real values:
+26, 17, 18); 200 for the RPC error, the whole "code: message", in `error`
+and in the control subcommands' stderr, which the panel displays; and for
+the egress fields `geo.ip` 64, `geo.city`/`region`/`org` 128, `geo.country`
+16, `geo.asn` 32 — counted after dropping control and format characters
+(Unicode Cc, Cf: bidi overrides, zero-width marks) and invalid UTF-8, never
+splitting a rune. Clipping truncates, it does not reject: the surrounding
+answer stands. The clipped id is the only id the daemon ever uses — the
+identity comparison, `dish.id`, config.json `lastDish` (written and read),
+events.jsonl `dish_switch`, the partition key and the notification text all
+derive from one conversion — so two ids that differ only past the cap are
+one dish.
 
-Strings the peers send are clipped, never copied whole (2026-11-23): the bar
-re-parses status.json every 2 s even with the panel closed, and the dish's
-device id / hardware / software strings, the RPC error text, and every egress
-field are the peers' to size. Each is cut to a rune cap — `dish.id`, `hw`
-and `sw` 64 (real values: 26, 17, 18); the RPC error, the whole
-"code: message", 200, in `error` and in the control subcommands' stderr,
-which the panel displays; `geo.ip` 64, `geo.city`/`region`/`org` 128,
-`geo.country` 16, `geo.asn` 32 — after dropping control and format
-characters (Unicode Cc, Cf: bidi overrides, zero-width marks) and invalid
-UTF-8, never splitting a rune. Clipping truncates, it does not reject: the
-surrounding answer stands. The clipped id is the only id the daemon ever
-uses — the identity comparison, `dish.id`, config.json
-`lastDish` (written and read), events.jsonl `dish_switch`, the partition key
-and the notification text all derive from one conversion — so two ids that
-differ only past the cap are one dish. Dish-reported outages are bounded at
-ingestion to the newest 100 by start time, whatever order the dish delivered
-them; what hist.json re-sorts per active tick never exceeds that.
+Egress lookup: the endpoint must be an absolute http or https URL with a
+host (`-geo-url`, validated before anything else runs); the lookup dials
+IPv4 only, reads at most 1 MiB of body, follows no redirect, and backs off
+5 min after a failure ("status.json — geo").
+
+Notifications: every notification draws from one bucket — 5 tokens, one back
+per 10 s — whatever fired it, and a dropped one still records its event;
+`notify-send` is resolved once at start to a trusted absolute path and never
+from PATH at notification time ("Notifications").
+
+Control socket: a command counts only when a newline terminates it within
+512 bytes, is acknowledged `ok` only once queued (`busy` otherwise), and the
+listener keeps accepting after transient failures; under `-idle-exit` the
+daemon exits cleanly once no command has arrived for the period ("Panel
+control socket").
+
+Cadence: a good→fail transition re-arms the failure probe at most 20 times
+in any rolling hour ("Panel control socket").
+
+State directory: a state file is written through a uniquely named temp file
+in its own directory, so nothing planted at a predictable name is opened or
+followed; events.jsonl is opened O_NOFOLLOW and chmodded through that
+descriptor — a symlink there is refused, never followed; the files the daemon
+loads are read capped — config.json 4 KiB, daily.json 16 KiB, day-*.json
+256 KiB — and a larger one is treated exactly like a corrupt one; the
+dishes/ root and a partition directory are 0700 when created, adopted or
+switched to, state files are 0600 and the state root 0700, and no other
+historical file or directory mode is rewritten. The state dir is published
+as `$XDG_RUNTIME_DIR/starlinkd` only into a runtime dir that exists, is
+owned by the daemon's uid and is not writable by group/others.
+
+The systemd user unit sets NoNewPrivileges, ProtectSystem=full, PrivateTmp,
+RestrictAddressFamilies, MemoryMax, UMask=0077, ProtectKernelTunables,
+ProtectKernelModules, ProtectClock, ProtectHostname, RestrictNamespaces,
+RestrictRealtime, RestrictSUIDSGID, LockPersonality, an empty
+CapabilityBoundingSet, PrivateDevices and SystemCallArchitectures=native —
+accident containment for this process, not a boundary against other code
+running as the same user.
 
 ## Field mapping ground truth (from testdata)
 
