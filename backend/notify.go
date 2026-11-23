@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -39,7 +41,9 @@ var notifySend = func(summary, body string) error {
 // resolveNotifySend fixes the notification helper for this run, before the
 // tick loop exists: exec.LookPath yields an absolute path, and only a
 // regular file owned by root or the daemon's euid with no group/other write
-// bits is accepted. Anything else — absent, not executable, a relative PATH
+// bits is accepted. Root is read as uid 0 — or, inside a service user
+// namespace that leaves host root unmapped, as the kernel's overflow uid
+// (overflowRootUID). Anything else — absent, not executable, a relative PATH
 // entry, a directory, a file another user (or the group, or everyone) can
 // rewrite — leaves notifications disabled for the run and returns the
 // reason for the caller to report. Soft failure: the daemon keeps running
@@ -64,11 +68,69 @@ func (d *daemon) resolveNotifySend() error {
 	case !ok:
 		return fmt.Errorf("notify-send %s: no owner information", path)
 	case st.Uid != 0 && int(st.Uid) != os.Geteuid():
-		return fmt.Errorf("notify-send %s: owned by uid %d, want root or %d", path, st.Uid, os.Geteuid())
+		// Neither root nor us: accepted only as root seen from a namespace
+		// that leaves host root unmapped (overflowRootUID).
+		if over, ok := overflowRootUID(); !ok || st.Uid != over {
+			return fmt.Errorf("notify-send %s: owned by uid %d, want root or %d", path, st.Uid, os.Geteuid())
+		}
 	case fi.Mode().Perm()&0o022 != 0:
 		return fmt.Errorf("notify-send %s: writable by group/other (%04o)", path, fi.Mode().Perm())
 	}
 	notifySendPath = path
 	d.vlog("notify-send: %s", path) // the resolution itself stays verbose-only
 	return nil
+}
+
+// overflowRootUID reports the kernel's overflow uid when the daemon runs
+// inside a user namespace that leaves host root unmapped, and false
+// otherwise. systemd starts an unprivileged user service that way once it
+// carries sandboxing directives such as ProtectKernelTunables or
+// PrivateDevices; the shipped unit's /proc/self/uid_map is "1000 1000 1".
+// There every unmapped host uid, root included, is reported as the overflow
+// uid: the root-owned /usr/bin/notify-send looked like uid 65534 and was
+// refused on every start (first live run of v1.7.0, 2026-11-23).
+//
+// Limitation, stated plainly: inside such a namespace a root-owned file and
+// a file owned by any other unmapped host uid are indistinguishable. The
+// acceptance is still sound — the candidate path comes from the service's
+// own PATH (the user's configuration, the same trust domain as the daemon),
+// and the regular-file and no-group/other-write rules apply to it
+// unchanged.
+//
+// False when host root is mapped (no namespace, a container's root
+// namespace), or when either /proc file cannot be read or parsed: the
+// caller then keeps the strict rule. Fail closed.
+func overflowRootUID() (uint32, bool) {
+	m, err := os.ReadFile("/proc/self/uid_map")
+	if err != nil {
+		return 0, false
+	}
+	// Lines of "ID-inside-ns ID-outside-ns length": host root is mapped
+	// iff some extent starts at outside ID 0.
+	f := strings.Fields(string(m))
+	if len(f) == 0 || len(f)%3 != 0 {
+		return 0, false
+	}
+	for i := 0; i < len(f); i += 3 {
+		var n [3]uint64
+		for j, s := range f[i : i+3] {
+			v, err := strconv.ParseUint(s, 10, 32)
+			if err != nil {
+				return 0, false
+			}
+			n[j] = v
+		}
+		if n[1] == 0 && n[2] > 0 {
+			return 0, false // host root is visible here: strict rule
+		}
+	}
+	over, err := os.ReadFile("/proc/sys/kernel/overflowuid")
+	if err != nil {
+		return 0, false
+	}
+	uid, err := strconv.ParseUint(strings.TrimSpace(string(over)), 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return uint32(uid), true
 }
