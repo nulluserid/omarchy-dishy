@@ -142,8 +142,12 @@ func run(args []string) int {
 	}
 
 	// The notification helper is resolved and verified here, once, before
-	// the tick loop — never from ambient PATH at notification time.
-	d.resolveNotifySend()
+	// the tick loop — never from ambient PATH at notification time. A
+	// refusal is reported once, unconditionally: the unit does not pass -v,
+	// so notifications stopping would otherwise leave no journal line.
+	if err := d.resolveNotifySend(); err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: notifications disabled: %v\n", err)
+	}
 	if err := d.startControl(); err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: %v (panel wake-ups disabled)\n", err)
 	}

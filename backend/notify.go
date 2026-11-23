@@ -41,39 +41,34 @@ var notifySend = func(summary, body string) error {
 // regular file owned by root or the daemon's euid with no group/other write
 // bits is accepted. Anything else — absent, not executable, a relative PATH
 // entry, a directory, a file another user (or the group, or everyone) can
-// rewrite — disables notifications for the run, saying why once. Soft
-// failure: the daemon keeps running (notifications are never fatal).
-func (d *daemon) resolveNotifySend() {
-	refuse := func(why string) {
-		notifySendPath = ""
-		d.vlog("notifications disabled: %s", why)
-	}
+// rewrite — leaves notifications disabled for the run and returns the
+// reason for the caller to report. Soft failure: the daemon keeps running
+// (notifications are never fatal).
+func (d *daemon) resolveNotifySend() error {
+	notifySendPath = "" // disabled unless proven trusted below
 	path, err := exec.LookPath("notify-send")
 	if err != nil {
-		refuse("notify-send: " + err.Error())
-		return
+		return fmt.Errorf("notify-send: %w", err)
 	}
 	if !filepath.IsAbs(path) {
-		refuse(fmt.Sprintf("notify-send %s: not an absolute path (relative PATH entry)", path))
-		return
+		return fmt.Errorf("notify-send %s: not an absolute path (relative PATH entry)", path)
 	}
 	fi, err := os.Stat(path)
 	if err != nil {
-		refuse(fmt.Sprintf("notify-send %s: %v", path, err))
-		return
+		return fmt.Errorf("notify-send %s: %w", path, err)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
 	switch {
 	case !fi.Mode().IsRegular():
-		refuse(fmt.Sprintf("notify-send %s: not a regular file", path))
+		return fmt.Errorf("notify-send %s: not a regular file", path)
 	case !ok:
-		refuse(fmt.Sprintf("notify-send %s: no owner information", path))
+		return fmt.Errorf("notify-send %s: no owner information", path)
 	case st.Uid != 0 && int(st.Uid) != os.Geteuid():
-		refuse(fmt.Sprintf("notify-send %s: owned by uid %d, want root or %d", path, st.Uid, os.Geteuid()))
+		return fmt.Errorf("notify-send %s: owned by uid %d, want root or %d", path, st.Uid, os.Geteuid())
 	case fi.Mode().Perm()&0o022 != 0:
-		refuse(fmt.Sprintf("notify-send %s: writable by group/other (%04o)", path, fi.Mode().Perm()))
-	default:
-		notifySendPath = path
-		d.vlog("notify-send: %s", path)
+		return fmt.Errorf("notify-send %s: writable by group/other (%04o)", path, fi.Mode().Perm())
 	}
+	notifySendPath = path
+	d.vlog("notify-send: %s", path) // the resolution itself stays verbose-only
+	return nil
 }
