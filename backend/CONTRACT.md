@@ -295,7 +295,19 @@ appended to events.jsonl.
 
 Trust (v5): `notify-send` is resolved once at daemon start (`exec.LookPath` →
 absolute path → `stat`) and accepted only as a regular file owned by root or
-the daemon's user with no group/other write bits. A refusal disables
+the daemon's user with no group/other write bits. Root is read as uid 0 — or,
+inside a user namespace that leaves host root unmapped, as the kernel's
+overflow uid. systemd starts the daemon that way under the shipped unit (its
+sandboxing directives need a private user namespace; `/proc/self/uid_map` is
+`1000 1000 1`), and there every unmapped host uid, root included, is reported
+as `/proc/sys/kernel/overflowuid`: the root-owned `/usr/bin/notify-send`
+shows as uid 65534. The acceptance applies only when host root is unmapped and
+the owner equals that overflow uid; with host root mapped, or either `/proc`
+file unreadable, the strict rule stands. Limitation: inside such a namespace a
+root-owned file and one owned by another unmapped host uid are
+indistinguishable — accepted because the path comes from the service's own
+PATH (the user's configuration, the daemon's own trust domain) and the
+regular-file and write-bit rules apply to it unchanged. A refusal disables
 notifications for the run and is reported once at startup on stderr as
 `starlinkd: notifications disabled: <reason>` (journald under systemd — no
 `-v` needed); a successful resolution is logged only with `-v`. The helper
