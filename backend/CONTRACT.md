@@ -281,6 +281,14 @@ config.json > 192.168.100.1:9200 (the one-shot `stow|unstow|reboot` controls
 resolve config.json > default when `-t` is absent). Deliberately no DNS
 fallback: a VPN or foreign network must not silently redirect dish traffic.
 
+`starlinkd panel open|close|alive` — the panel channel (see "Panel control
+socket"). `panel alive` is the widget's heartbeat: it waits for the reply and
+exits 0 only on the daemon's `ok`, so any nonzero exit means nobody is
+listening. It lives under `panel` rather than as a verb of its own because
+that is fail-safe on older binaries: an unknown top-level verb is ignored
+and starts a full daemon beside the real one, while `panel` (since v1.1)
+exits 2 with its usage line on any mode it does not know.
+
 ## State directory
 
 The daemon resolves its state dir as `$XDG_STATE_HOME/starlinkd`, else
@@ -329,6 +337,20 @@ host` reports that as rejected). The listener survives transient accept
 failures (a descriptor-limit burst, an aborted client) and stops only with
 the process.
 
+`starlinkd panel alive` is the liveness heartbeat (2026-11-23): the bar
+widget sends it at load and every 5 minutes regardless of visibility. On the
+socket the command is `alive\n`, validated, queued and acknowledged (`ok`)
+exactly like `open`/`close`, and every control-socket command — `alive`,
+`open`, `close`, `set host …` — counts as a liveness signal. With
+`-idle-exit` (the service unit passes `-idle-exit 15m`) the daemon exits
+cleanly, status 0, once no such command has arrived for that long: the wait
+never sleeps past the deadline, and a daemon started at boot gets one full
+period to hear the first heartbeat. Two widget-side decisions: the service
+is started only at shell load, never on a failed heartbeat — a crash is
+covered by the unit's `Restart=on-failure`, and starting on every failed
+ping would make a deliberately stopped daemon un-stoppable — and the
+timeout is a uniform 15 minutes.
+
 ## Daemon flags
 
 `starlinkd [-t 192.168.100.1:9200] [-interval 2s] [-idle-interval 10s]
@@ -339,6 +361,8 @@ the process.
 - `-map-interval`: obstruction map refresh (dashboard open only).
 - `-once`: single tick, write files, print status.json to stdout, exit.
 - `-v`: log transitions + errors to stderr (journald under systemd).
+- `-idle-exit`: exit cleanly (status 0) once no control-socket command
+  arrived for this long (default 0 = never; the service unit passes `15m`).
 
 ## Security hardening (2026-10-31)
 

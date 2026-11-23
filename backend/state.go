@@ -80,6 +80,8 @@ type config struct {
 	once                  bool
 	verbose               bool
 	dir                   string // state dir, ~/.local/state/starlinkd
+	// Exit after this long without a control-socket command (0 = never).
+	idleExit time.Duration
 }
 
 // ---- status.json ----
@@ -336,6 +338,11 @@ type daemon struct {
 	lastObs    obsStats
 	lastFile   *statusFile // printed by -once
 	lastErr    string      // for rate-limited error logging
+
+	// Idle exit (-idle-exit): the moment the daemon gives up on ever being
+	// polled again. Zero while the flag is off; otherwise start + one period,
+	// pushed out by every control-socket command (applyControl).
+	idleExitAt time.Time
 }
 
 func newDaemon(cfg config, client api.DeviceClient) *daemon {
@@ -351,6 +358,11 @@ func newDaemon(cfg config, client api.DeviceClient) *daemon {
 	d.day.minute = -1 // no open bucket until the first sample
 	d.resetArrays()
 	d.notifyTokens, d.notifyAt = notifyBurst, time.Now() // notification bucket starts full
+	if cfg.idleExit > 0 {
+		// One full period to hear the first heartbeat: a daemon started at
+		// boot must not exit before the shell has had time to load.
+		d.idleExitAt = time.Now().Add(cfg.idleExit)
+	}
 	return d
 }
 

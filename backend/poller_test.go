@@ -645,6 +645,7 @@ func TestControlLineTruncation(t *testing.T) {
 		{"split write is assembled before acting", []string{"set host 1.", "2.3.4:9200\n"}, false, "ok", "set host 1.2.3.4:9200"},
 		{"bytes after the newline are ignored", one("close\njunk"), false, "ok", "close"},
 		{"dropped command is not acknowledged", one("close\n"), true, "busy", "occupied"},
+		{"alive heartbeat is forwarded like open and close", one("alive\n"), false, "ok", "alive"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := net.Pipe()
@@ -718,6 +719,42 @@ func TestControlLineTruncation(t *testing.T) {
 	case got := <-ch:
 		t.Fatalf("unterminated line was forwarded: %q", got)
 	default:
+	}
+	// Every forwarded command is a liveness signal. Under -idle-exit the
+	// deadline starts one period out, moves a full period past each command,
+	// and the main loop's wait never sleeps past it.
+	cfg := config{interval: 2 * time.Second, idleInterval: 10 * time.Second, idleExit: time.Minute}
+	d := newDaemon(cfg, nil)
+	if until := time.Until(d.idleExitAt); until > time.Minute || until < 55*time.Second {
+		t.Fatalf("idle deadline starts %v after start, want one full period", until)
+	}
+	now := time.Now()
+	d.idleExitAt = now.Add(4 * time.Second)
+	if got, want := d.nextWake(), 4*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v, want the idle deadline at %v rather than the 10 s tick", got, want)
+	}
+	if d.idleExpired(now.Add(3 * time.Second)) {
+		t.Fatal("idle expired before the deadline")
+	}
+	d.applyControl("alive", now.Add(2*time.Second))
+	if want := now.Add(2 * time.Second).Add(time.Minute); !d.idleExitAt.Equal(want) {
+		t.Fatalf("idle deadline = %v after a heartbeat, want %v", d.idleExitAt, want)
+	}
+	if got, want := d.nextWake(), 10*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v after a heartbeat, want the 10 s tick (the deadline is further out)", got)
+	}
+	d.idleExitAt = now // the deadline passed with nothing heard since
+	if !d.idleExpired(now.Add(time.Second)) {
+		t.Fatal("idle deadline passed without a command: want expired")
+	}
+	// Without the flag none of this exists: never expired, plain tick delay.
+	cfg.idleExit = 0
+	off := newDaemon(cfg, nil)
+	if off.idleExpired(now.Add(time.Hour)) {
+		t.Fatal("idle exit armed without -idle-exit")
+	}
+	if got, want := off.nextWake(), 10*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v without -idle-exit, want the 10 s tick", got)
 	}
 }
 

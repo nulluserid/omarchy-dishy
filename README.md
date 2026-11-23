@@ -15,8 +15,12 @@ Then run `./install.sh` once from
 `~/.config/omarchy/plugins/io.github.nulluserid.dishy/` to install the `starlinkd`
 backend service. The bar widget shows live data within ~2 seconds.
 
-After a plugin update (`omarchy plugin update`), restart the shell once to
-pick up dashboard changes — the shell caches QML until restart.
+After a plugin update (`omarchy plugin update`), run `./install.sh`, then
+restart the shell. The installer restarts the daemon with the new binary and
+the shell caches QML until restart — and the daemon now exits after 15
+minutes without a heartbeat from the widget: until the shell restarts, the
+old widget sends none, so the daemon would stop and the widget show stale
+data.
 
 ## What it shows
 
@@ -117,9 +121,10 @@ Upgrading from ≤ 1.1.1: run `./install.sh` once — the service unit no longer
 pins the dish target, which is what makes the setting (and `starlinkd set
 host`) effective.
 
-Upgrading from ≤ 1.6.0: run `./install.sh` once — it restarts the daemon,
-which now publishes its state directory to the widget and bounds the
-obstruction map.
+Upgrading from ≤ 1.6.0: run `./install.sh`, then restart the shell — the
+installer restarts the daemon, which now publishes its state directory to
+the widget, bounds the obstruction map, and exits after 15 minutes without
+a heartbeat (only the restarted shell's widget sends one).
 
 ## Remove
 

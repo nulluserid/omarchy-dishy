@@ -4,7 +4,7 @@
 //
 //	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-once] [-v]
 //	starlinkd stow|unstow|reboot [-t host:port]
-//	starlinkd panel open|close
+//	starlinkd panel open|close|alive
 //	starlinkd set host <host[:port]>
 //
 // The dish target resolves as: -t flag > config.json > 192.168.100.1:9200.
@@ -50,6 +50,7 @@ func run(args []string) int {
 	once := fs.Bool("once", false, "run a single tick, write files, print status.json, exit")
 	verbose := fs.Bool("v", false, "log transitions and errors to stderr")
 	showVersion := fs.Bool("version", false, "print version and exit")
+	idleExit := fs.Duration("idle-exit", 0, "exit once no control-socket command (alive/open/close/set host) arrived for this long; 0 = never")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -116,6 +117,7 @@ func run(args []string) int {
 		once:                  *once,
 		verbose:               *verbose,
 		dir:                   dir,
+		idleExit:              *idleExit,
 	}, api.NewDeviceClient(conn))
 	d.conn = conn
 	// Per-dish partitions: preload the last-seen dish's counters so restarts
@@ -149,10 +151,18 @@ func run(args []string) int {
 	// First tick is active: dashboard data (incl. hist.json) lands immediately.
 	d.tick(true)
 	for {
-		tm := time.NewTimer(d.nextDelay())
+		// The wait ends at the next tick or at the idle deadline, whichever
+		// comes first: a daemon nobody polls any more leaves on time.
+		tm := time.NewTimer(d.nextWake())
 		select {
 		case <-tm.C:
-			d.tick(d.panelActive(time.Now()))
+			now := time.Now()
+			if d.idleExpired(now) {
+				d.vlog("idle exit: no control-socket command for %s", d.cfg.idleExit)
+				d.closeControl() // the gRPC connection closes with the deferred Close below
+				return 0
+			}
+			d.tick(d.panelActive(now))
 		case cmd := <-d.ctrlCh:
 			if !tm.Stop() {
 				select {
