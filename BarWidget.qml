@@ -184,10 +184,20 @@ BarWidget {
     onTriggered: root.pushHostNow(root.pendingHost)
   }
 
+  // No FileView in this widget logs a failed read: a missing path is normal
+  // for each of them — config.json until the first `set host`, the runtime
+  // dir's status.json until the daemon has published its link, the mirror's
+  // on a daemon that uses another state dir — and Quickshell would log a
+  // load error on every such tick.
   // blockAllReads, not blockLoading: after a state dir switch FileView keeps
   // the previous file's text until the new read lands, and the seed has to
   // see the config.json at the new path.
-  FileView { id: configFile; path: root.stateDir + "/config.json"; blockAllReads: true }
+  FileView {
+    id: configFile
+    path: root.stateDir + "/config.json"
+    blockAllReads: true
+    printErrors: false
+  }
 
   // STARLINKD_STATE_DIR keeps the CLI on the directory this widget reads.
   // With no daemon listening, `set host` writes config.json itself, and the
@@ -283,8 +293,6 @@ BarWidget {
     path: root.runtimeStateDir + "/status.json"
     preload: false
     blockAllReads: true
-    // Its "not found" is the normal state until the updated daemon has run
-    // this session, so it is not logged.
     printErrors: false
   }
   FileView {
@@ -292,6 +300,7 @@ BarWidget {
     path: root.mirrorStateDir + "/status.json"
     preload: false
     blockAllReads: true
+    printErrors: false
   }
 
   // ---- daemon lifetime ----

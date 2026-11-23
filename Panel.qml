@@ -854,8 +854,12 @@ Panel {
     command: []
   }
 
-  FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }
-  FileView { id: dayFile; path: root.dayPath; blockLoading: true }
+  // Neither read here logs a failure: a missing file is normal — hist.json
+  // until the daemon's first dashboard-open tick, a day file until the first
+  // minute of the day has been written — and Quickshell would log a load
+  // error on every such reload.
+  FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true; printErrors: false }
+  FileView { id: dayFile; path: root.dayPath; blockLoading: true; printErrors: false }
 
   Process {
     id: ctl
