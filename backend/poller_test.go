@@ -746,6 +746,11 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 		{"trailing cells", 4, 4, grid(17, 0)},
 		{"cell above the range", 4, 4, append(grid(15, 0), 1.01)},
 		{"cell below the range", 4, 4, append(grid(15, 0), -1.01)},
+		// Finiteness is judged on the raw cell: round() would turn NaN/Inf
+		// into 0 and pass a hostile cell off as a clear one.
+		{"NaN cell", 1, 2, []float32{float32(math.NaN()), 0}},
+		{"+Inf cell", 1, 2, []float32{float32(math.Inf(1)), 0}},
+		{"-Inf cell", 1, 2, []float32{float32(math.Inf(-1)), 0}},
 	} {
 		if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: tc.rows, NumCols: tc.cols, Snr: tc.snr}); m != nil {
 			t.Errorf("%s: accepted %dx%d", tc.name, m.Rows, m.Cols)
@@ -779,14 +784,6 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 	// 1 (a valid cell) is accepted like any other, beside the -1 sentinel.
 	if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: 1, NumCols: 2, Snr: []float32{1, -1}}); m == nil || m.Snr[0] != 1 || m.Snr[1] != -1 {
 		t.Fatalf("edge cells: %+v", m)
-	}
-	// A non-finite cell is neutralized, not a rejection: round() maps
-	// NaN/Inf to 0 before the range check, so no published map can carry a
-	// value encoding/json would refuse.
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 1, NumCols: 2, Snr: []float32{float32(math.NaN()), float32(math.Inf(1))},
-	}); m == nil || m.Snr[0] != 0 || m.Snr[1] != 0 {
-		t.Fatalf("non-finite cells: %+v", m)
 	}
 }
 

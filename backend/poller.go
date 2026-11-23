@@ -225,7 +225,15 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
 		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
 			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes)); m != nil {
-			d.mapData = toObsMap(m.GetDishGetObstructionMap())
+			// A delivered answer always advances the clock — a hostile or odd
+			// endpoint is asked again only every mapInterval — but only an
+			// accepted map replaces the last one: last-good-wins, the rule the
+			// state files follow ("a hostile value must not replace previously
+			// written state"). A switch clears the map explicitly, so nothing
+			// of the old dish's survives here.
+			if om := toObsMap(m.GetDishGetObstructionMap()); om != nil {
+				d.mapData = om
+			}
 			d.lastMap = now
 		}
 	}
@@ -880,11 +888,16 @@ func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
 	}
 	snr := make([]float64, rows*cols)
 	for i, v := range m.GetSnr() {
+		// Finiteness is decided on the RAW cell: round() maps NaN/Inf to 0,
+		// which would pass a hostile cell off as a clear one instead of
+		// rejecting the map whole, like the history samples are skipped.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil
+		}
+		// CONTRACT.md: 0..1 per cell, -1 = no data. The range check runs on
+		// the rounded value, because that is what gets published.
 		c := round(float64(v), 2)
-		// CONTRACT.md: 0..1 per cell, -1 = no data. round() already maps
-		// NaN/Inf to 0; the finite term is stated anyway so what this
-		// accepts never silently depends on another function's behavior.
-		if math.IsNaN(c) || math.IsInf(c, 0) || c < -1 || c > 1 {
+		if c < -1 || c > 1 {
 			return nil
 		}
 		snr[i] = c

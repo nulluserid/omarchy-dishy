@@ -209,6 +209,28 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	if sent != 1 {
 		t.Errorf("healthy switch sent %d notifications, want still 1", sent)
 	}
+
+	// The map that replaces the last one has to be acceptable itself: a
+	// delivered but rejected answer advances the refresh clock (the dish is
+	// asked again only every mapInterval) and leaves the last accepted map
+	// in place — last-good-wins, as for the state files.
+	c.mapRes = &dish.DishGetObstructionMapResponse{NumRows: 2, NumCols: 2, Snr: []float32{0, 0.5, 1, -1}}
+	d.goodTick(t0.Add(6*time.Second), c.status, true, false, 2*time.Second)
+	kept, asked := d.mapData, d.lastMap
+	if kept == nil || len(kept.Snr) != 4 || !asked.Equal(t0.Add(6*time.Second)) {
+		t.Fatalf("accepted map not published: %+v at %v", kept, asked)
+	}
+	// Incoherent answer, delivered before the interval elapsed: not asked.
+	c.mapRes = &dish.DishGetObstructionMapResponse{NumRows: 4, NumCols: 4, Snr: []float32{9}}
+	d.goodTick(t0.Add(8*time.Second), c.status, true, false, 2*time.Second)
+	if !d.lastMap.Equal(asked) {
+		t.Fatalf("map fetched before mapInterval: lastMap = %v, want %v", d.lastMap, asked)
+	}
+	// Due again: delivered and rejected — the clock moves, the map stays.
+	d.goodTick(asked.Add(d.cfg.mapInterval).Add(time.Second), c.status, true, false, 2*time.Second)
+	if d.mapData != kept || !d.lastMap.After(asked) {
+		t.Fatalf("rejected refresh: map %p (want the accepted %p), lastMap %v (want advanced past %v)", d.mapData, kept, d.lastMap, asked)
+	}
 }
 
 func TestDishSwitchNoByteBackfill(t *testing.T) {

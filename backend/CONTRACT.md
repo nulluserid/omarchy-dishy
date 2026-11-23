@@ -147,7 +147,8 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
   "map": { "rows": 123, "cols": 123, "maxThetaDeg": 90.0,
            "snr": [0..1 per cell, -1 = no data] }   // row-major, refreshed every 60s;
                                                      // 1 ≤ rows,cols ≤ 256, exactly
-                                                     // rows·cols cells, else null
+                                                     // rows·cols cells; null only until
+                                                     // the first accepted map
 }
 ```
 
@@ -348,10 +349,10 @@ skipped and `round()` neutralizes non-finite floats so no state file can
 carry them (a marshal failure now keeps the last good file instead of writing
 an empty object); obstruction maps (2026-11-23) are accepted only as a
 coherent bounded grid — 1 ≤ rows,cols ≤ 256, exactly rows·cols delivered
-cells, every cell finite in [-1, 1] after rounding — and rejected whole
-otherwise: a rejected grid publishes `map: null`, a reply that fails or
-exceeds its 1 MiB per-call cap keeps the last accepted map (ObsMap.qml
-additionally refuses incoherent grids);
+cells, every raw cell finite and, once rounded, in [-1, 1] — and rejected
+whole otherwise, keeping the last accepted map in place while still
+advancing the refresh clock, as a reply that fails or exceeds its 1 MiB
+per-call cap does (ObsMap.qml additionally refuses incoherent grids);
 dish-reported outage starts are accepted only within the freshness window
 (never future-dated) and announcements are rate-limited to one per 60 s,
 with every notification drawing from one shared bucket ("Notifications");
