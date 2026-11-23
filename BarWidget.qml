@@ -10,6 +10,10 @@ import "Model.js" as Model
 // possible state dirs answers: the $XDG_RUNTIME_DIR/starlinkd symlink it
 // publishes at start, or $XDG_STATE_HOME/starlinkd (default
 // ~/.local/state/starlinkd). Decided per tick (Model.pickSource, in tick()).
+// It also holds the daemon up: the service's starlinkd exits after 15 minutes
+// without a panel command or an `alive` ping, and this widget sends one at
+// start and every 5 minutes (see "daemon lifetime"), so the backend lives and
+// dies with the plugin.
 BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
@@ -223,6 +227,7 @@ BarWidget {
     // the path the widget ends up on.
     root.probeStateDir()
     root.seedAppliedHost()
+    root.sendAlive(true)
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -278,6 +283,44 @@ BarWidget {
     path: root.mirrorStateDir + "/status.json"
     preload: false
     blockAllReads: true
+  }
+
+  // ---- daemon lifetime ----
+  // The service runs starlinkd with -idle-exit 15m: it exits cleanly once
+  // neither a panel command nor an `alive` has reached it for that long. This
+  // widget is what keeps it up — a ping at start and then every 5 minutes,
+  // whatever the bar's visibility or the panel — so disabling or removing the
+  // plugin takes its backend down within 15 minutes, and the next shell start
+  // brings it back. `starlinkd alive` goes through the runtime socket and
+  // needs no state dir. One reusable Process; a ping still running is not
+  // stacked on.
+  function sendAlive(mayStart) {
+    if (alivePing.running) return
+    alivePing.mayStart = mayStart
+    alivePing.running = true
+  }
+
+  Process {
+    id: alivePing
+    property bool mayStart: false
+    command: [root.binPath, "alive"]
+    onExited: function(exitCode) {
+      // Non-zero: nothing is listening. Only the start-of-session ping acts
+      // on it, by starting the service once and ignoring the result — a
+      // no-op when it already runs or is not installed.
+      if (exitCode !== 0 && mayStart) daemonStart.running = true
+      mayStart = false
+    }
+  }
+
+  Process { id: daemonStart; command: ["systemctl", "--user", "start", "starlinkd.service"] }
+
+  Timer {
+    // The keepalive: always on, and well inside the daemon's 15 minutes.
+    interval: 300000
+    running: true
+    repeat: true
+    onTriggered: root.sendAlive(false)
   }
 
   Loader {
