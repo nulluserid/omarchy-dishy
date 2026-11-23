@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"math"
@@ -38,9 +39,13 @@ func dial(target string) (*grpc.ClientConn, error) {
 		}))
 }
 
+// rpcErr renders a failed Handle call as "code: message". The message is
+// the peer's own text, hostile-sized on a hostile endpoint, and it is
+// written into status.json on every fail tick — so the whole string is
+// clipped, never trusted.
 func rpcErr(err error) string {
 	s := grpcstatus.Convert(err)
-	return s.Code().String() + ": " + s.Message()
+	return clip(s.Code().String()+": "+s.Message(), maxRPCErrorRunes)
 }
 
 func (d *daemon) vlog(format string, args ...any) {
@@ -140,17 +145,20 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// before anything books (CONTRACT.md v4). A new id from a KNOWN dish must
 	// persist for dishSwitchDebounceTicks consecutive good ticks first: a
 	// hostile endpoint rotating ids per tick then never creates partitions.
-	if id := s.GetDeviceInfo().GetId(); id != "" {
-		hw := s.GetDeviceInfo().GetHardwareVersion()
+	// The id and hardware string are taken clipped from the trust boundary
+	// (identifyDish): the id compared here is the same one that reaches the
+	// partition, every state file and the notification text.
+	ident := identifyDish(s)
+	if id := ident.ID; id != "" {
 		switch {
 		case d.dishID == "":
-			d.switchDish(now, id, hw) // first sighting adopts immediately
+			d.switchDish(now, id, ident.HW) // first sighting adopts immediately
 		case id == d.dishID:
 			d.pendingID, d.pendingIDTicks = "", 0
 		case id == d.pendingID:
 			d.pendingIDTicks++
 			if d.pendingIDTicks >= dishSwitchDebounceTicks {
-				d.switchDish(now, id, hw)
+				d.switchDish(now, id, ident.HW)
 			} else {
 				d.publishPendingTick(now, s)
 				return
@@ -200,8 +208,11 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 			}
 			res = d.ingest(hh, uptime, haveUp, now)
 			d.lastHist = now
-			d.observeDishOutages(hh.GetOutages(), now, ingestGap)
-			d.lastOutages = toOutages(hh.GetOutages())
+			// Bounded once, at ingestion: both consumers below see the same
+			// newest maxOutageEntries outages, never the delivered list whole.
+			outages := newestOutages(hh.GetOutages(), maxOutageEntries)
+			d.observeDishOutages(outages, now, ingestGap)
+			d.lastOutages = toOutages(outages)
 			histOK = true
 		} else if h != nil {
 			d.vlog("history: short response")
@@ -488,6 +499,11 @@ func pf(v float64, n int) *float64 {
 
 // ---- dish-reported outages ----
 
+// maxOutageEntries bounds the dish-reported outage list kept from one
+// history answer: newestOutages keeps the newest this many at ingestion, and
+// observeDishOutages walks at most this many.
+const maxOutageEntries = 100
+
 func toOutages(list []*dish.DishOutage) []outage {
 	out := make([]outage, 0, len(list))
 	for _, o := range list {
@@ -500,6 +516,50 @@ func toOutages(list []*dish.DishOutage) []outage {
 	return out
 }
 
+// outageHeap is newestOutages' running "newest so far" set: a min-heap on the
+// start timestamp, so the root is always the oldest kept entry — the one a
+// newer delivered outage evicts.
+type outageHeap []*dish.DishOutage
+
+func (h outageHeap) Len() int { return len(h) }
+func (h outageHeap) Less(i, j int) bool {
+	return h[i].GetStartTimestampNs() < h[j].GetStartTimestampNs()
+}
+func (h outageHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *outageHeap) Push(x any)   { *h = append(*h, x.(*dish.DishOutage)) }
+func (h *outageHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// newestOutages keeps the newest n outages by start time, oldest first. It
+// does not lean on the dish's delivery order — the capture holds a single
+// outage, so there is no documented order an end-truncation could trust —
+// and it holds at most n entries: a list as long as the gRPC message limit
+// allows costs one pass and no allocation that grows with it.
+func newestOutages(list []*dish.DishOutage, n int) []*dish.DishOutage {
+	if len(list) <= n {
+		return list
+	}
+	h := make(outageHeap, n)
+	copy(h, list[:n])
+	heap.Init(&h)
+	for _, o := range list[n:] {
+		if o.GetStartTimestampNs() > h[0].GetStartTimestampNs() {
+			h[0] = o // newer than the oldest kept one: evict it
+			heap.Fix(&h, 0)
+		}
+	}
+	// Pops come out oldest first, straight into the head of the delivered
+	// slice (free by now), so the result reuses that backing array.
+	for i := 0; i < n; i++ {
+		list[i] = heap.Pop(&h).(*dish.DishOutage)
+	}
+	return list[:n]
+}
+
 // observeDishOutages fires outage_start for an outage the dish reports as
 // just beginning. Historical entries only prime the watermark. The freshness
 // window derives from the ingest gap (a ring skimmed every 60 s still
@@ -507,9 +567,8 @@ func toOutages(list []*dish.DishOutage) []outage {
 // parked away, outages that started (and likely ended) long ago are recorded
 // silently instead of announced as new.
 func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time, gap time.Duration) {
-	const maxOutageEntries = 100
 	if len(list) > maxOutageEntries {
-		list = list[:maxOutageEntries] // hostile lists are bounded, not unbounded work
+		list = list[:maxOutageEntries] // second guard: the tick path is already bounded
 	}
 	window := int64(gap.Seconds()) + 2
 	if window > int64(maxOutageAnnounceWindow.Seconds()) {
@@ -602,8 +661,28 @@ func (d *daemon) emit(ev event, summary, body string) {
 
 // ---- file builders ----
 
+// dishIdent is a dish's identity as the daemon may use it anywhere: the
+// device id, hardware and software strings of an answer, clipped at the dish
+// trust boundary. Every consumer — status.json on good and fail ticks, the
+// identity comparison in goodTick, the partition key, config.json's
+// lastDish, events.jsonl and the notification text — derives from this one
+// conversion, so they all agree on the same bounded id.
+type dishIdent struct {
+	ID, HW, SW string
+}
+
+func identifyDish(s *dish.DishGetStatusResponse) dishIdent {
+	di := s.GetDeviceInfo()
+	return dishIdent{
+		ID: clip(di.GetId(), maxDishStrRunes),
+		HW: clip(di.GetHardwareVersion(), maxDishStrRunes),
+		SW: clip(di.GetSoftwareVersion(), maxDishStrRunes),
+	}
+}
+
 func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state, detail string) *statusFile {
 	di := s.GetDeviceInfo()
+	ident := identifyDish(s)
 	o := s.GetObstructionStats()
 	totalOut, countOut := outagesInWindow(d.lastOutages, now.Unix(), 15*60)
 	p50, p95, mean := latStats(d.arrays[aLat], 300)
@@ -612,9 +691,9 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 		Ts: now.Unix(),
 		Ok: true,
 		Dish: dishInfo{
-			ID:        di.GetId(),
-			HW:        di.GetHardwareVersion(),
-			SW:        di.GetSoftwareVersion(),
+			ID:        ident.ID,
+			HW:        ident.HW,
+			SW:        ident.SW,
 			BootCount: int64(di.GetBootcount()),
 			UptimeS:   int64(s.GetDeviceState().GetUptimeS()),
 			EthMbps:   int64(s.GetEthSpeedMbps()),
@@ -684,10 +763,10 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 		},
 	}
 	if s := d.lastStatus; s != nil && s.GetDeviceInfo() != nil {
-		di := s.GetDeviceInfo()
+		ident := identifyDish(s) // the same clipped identity the good ticks published
 		sf.Dish = dishInfo{
-			ID: di.GetId(), HW: di.GetHardwareVersion(), SW: di.GetSoftwareVersion(),
-			BootCount: int64(di.GetBootcount()), EthMbps: int64(s.GetEthSpeedMbps()),
+			ID: ident.ID, HW: ident.HW, SW: ident.SW,
+			BootCount: int64(s.GetDeviceInfo().GetBootcount()), EthMbps: int64(s.GetEthSpeedMbps()),
 		}
 	}
 	sf.Usage = usageStats{

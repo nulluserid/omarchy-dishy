@@ -5,10 +5,55 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	dish "starlinkd/gen/spacex_api/device/dish"
 	udc "starlinkd/gen/spacex_api/satellites/network/ut_disablement_codes"
 )
+
+// Rune caps for strings that arrive from an untrusted wire — the dish's
+// answers and the egress lookup — and land in a state file the QML parses on
+// the GUI thread (the bar re-parses status.json every 2 s, panel closed), an
+// events.jsonl line, or a notify-send argument. For scale: a real device id
+// is 26 runes, hw "mini1_panda_prod1" (17), sw "2026.09.08.mr86422" (18).
+const (
+	maxDishStrRunes    = 64 // device id, hardware and software version
+	maxRPCErrorRunes   = 200
+	maxGeoIPRunes      = 64
+	maxGeoTextRunes    = 128 // city, region, carrier org
+	maxGeoCountryRunes = 16
+	maxGeoASNRunes     = 32
+)
+
+// clip bounds such a string at max runes and drops control characters
+// (Unicode Cc: newlines, ESC, DEL, …) and invalid UTF-8, never splitting a
+// rune. It truncates rather than rejects — the surrounding answer still
+// stands, the string is just hostile-sized. (The obstruction map is the
+// exception that is rejected whole: a truncated sky would be a lie.)
+func clip(s string, max int) string {
+	if len(s) <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, unicode.IsControl) {
+		return s // short and clean, like every real value
+	}
+	var b strings.Builder
+	b.Grow(min(len(s), max*utf8.UTFMax))
+	n := 0
+	for i, r := range s {
+		if n == max {
+			break
+		}
+		if r == utf8.RuneError {
+			if _, size := utf8.DecodeRuneInString(s[i:]); size == 1 {
+				continue // an invalid byte, not an encoded U+FFFD
+			}
+		}
+		if unicode.IsControl(r) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
+}
 
 // round rounds v to n decimal places. Non-finite values (NaN/Inf can enter
 // through hostile dish responses) become 0 so no marshaled document can

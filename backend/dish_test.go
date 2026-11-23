@@ -427,4 +427,19 @@ func TestAdoptLastDish(t *testing.T) {
 	if d3.dishID != "" || d3.statDir() != d3.cfg.dir {
 		t.Fatalf("empty adopt: id=%q dir=%q", d3.dishID, d3.statDir())
 	}
+
+	// config.json is the daemon's own file; still, the id adopted from it is
+	// clipped like a live one, so d.dishID never holds anything else.
+	want := strings.Repeat("u", maxDishStrRunes)
+	d4 := newDaemon(config{dir: t.TempDir()}, nil)
+	if err := os.MkdirAll(d4.partitionDir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDaemonConfig(d4.cfg.dir, daemonConfig{LastDish: strings.Repeat("u", 40) + "\n" + strings.Repeat("u", 260)}); err != nil {
+		t.Fatal(err)
+	}
+	d4.adoptLastDish(t0)
+	if d4.dishID != want || d4.statDir() != d4.partitionDir(want) {
+		t.Fatalf("adopt of an oversize id: id=%q (len %d) dir=%q", d4.dishID, len(d4.dishID), d4.statDir())
+	}
 }

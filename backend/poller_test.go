@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
 
@@ -477,6 +480,34 @@ func TestOutageAnnounceCooldown(t *testing.T) {
 	if sent > 4 {
 		t.Fatalf("rotating outage starts sent %d notifications in 12s, cooldown not enforced", sent)
 	}
+	// The same endpoint can also pad the list. Ingestion keeps only the
+	// newest maxOutageEntries by start time, whatever order they arrive in,
+	// so what is retained and re-sorted per active tick stays bounded.
+	padded := func(order string) []*dish.DishOutage {
+		list := make([]*dish.DishOutage, 5000)
+		for i := range list {
+			start := i + 1
+			switch order {
+			case "descending":
+				start = 5000 - i
+			case "shuffled": // 7919 is coprime to 5000: a permutation
+				start = (i*7919)%5000 + 1
+			}
+			list[i] = &dish.DishOutage{Cause: dish.DishOutage_BOOTING, StartTimestampNs: int64(start) * 1e9, DurationNs: 1e9}
+		}
+		return list
+	}
+	for _, order := range []string{"ascending", "descending", "shuffled"} {
+		c.history = mkHist(uint64(600), []float32{20}, []float32{0})
+		c.history.Outages = padded(order)
+		d.goodTick(t0.Add(time.Minute), c.status, true, true, 2*time.Second)
+		if len(d.lastOutages) != maxOutageEntries {
+			t.Fatalf("%s: retained %d outages, want %d", order, len(d.lastOutages), maxOutageEntries)
+		}
+		if first, last := d.lastOutages[0].Start, d.lastOutages[len(d.lastOutages)-1].Start; first != 5000-maxOutageEntries+1 || last != 5000 {
+			t.Fatalf("%s: kept starts %d..%d, want %d..5000 (the newest)", order, first, last, 5000-maxOutageEntries+1)
+		}
+	}
 	// A real dish's static start still announces exactly once.
 	d2 := newDaemon(config{
 		interval: 2 * time.Second, idleInterval: 10 * time.Second,
@@ -521,6 +552,44 @@ func TestRotatingIDDebounce(t *testing.T) {
 	}
 	if len(entries) > 2 {
 		t.Fatalf("rotating ids created %d partitions, want <= 2 (initial adopt only)", len(entries))
+	}
+
+	// The same endpoint can also send hostile-sized identity strings. They
+	// are clipped once at the boundary and THAT id is the dish everywhere:
+	// an answer differing only past the cap is the same dish, and no state
+	// file ever carries more than the cap.
+	want := strings.Repeat("u", maxDishStrRunes)
+	c.status = statusWithID(strings.Repeat("u", 40) + "\n\x1b" + strings.Repeat("u", 260))
+	c.status.DeviceInfo.HardwareVersion = strings.Repeat("h", 300)
+	c.status.DeviceInfo.SoftwareVersion = strings.Repeat("s", 300)
+	c.history = mkHist(uint64(600), []float32{20}, []float32{0})
+	d.goodTick(t0.Add(time.Minute), c.status, false, true, 2*time.Second)               // a new id: first answer only pends
+	c.status.DeviceInfo.Id += "tail-beyond-the-cap"                                     // same clipped id
+	d.goodTick(t0.Add(time.Minute+2*time.Second), c.status, false, true, 2*time.Second) // second: switches
+	if d.dishID != want {
+		t.Fatalf("dishID = %q (%d bytes), want the clipped %d-rune id", d.dishID, len(d.dishID), maxDishStrRunes)
+	}
+	if _, err := os.Stat(d.partitionDir(want)); err != nil {
+		t.Fatalf("partition for the clipped id missing: %v", err)
+	}
+	// Fail ticks republish the identity of the last good answer.
+	d.failTick(t0.Add(time.Minute+4*time.Second), "refused", 2*time.Second, false)
+	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want ||
+		dish["hw"] != strings.Repeat("h", maxDishStrRunes) || dish["sw"] != strings.Repeat("s", maxDishStrRunes) {
+		t.Fatalf("status.json dish = %v, want every field clipped to %d runes", dish, maxDishStrRunes)
+	}
+	if cfg := readJSON(t, dir, "config.json"); cfg["lastDish"] != want {
+		t.Fatalf("config lastDish = %q, want the clipped id", cfg["lastDish"])
+	}
+	if ev := readFile(t, filepath.Join(dir, "events.jsonl")); !strings.Contains(ev, `"type":"dish_switch","from":"fake-00","to":"`+want+`"`) {
+		t.Fatalf("events.jsonl dish_switch does not carry the clipped id: %s", ev)
+	}
+	for _, name := range []string{"status.json", "config.json", "events.jsonl"} {
+		for _, letter := range []string{"u", "h", "s"} {
+			if strings.Contains(readFile(t, filepath.Join(dir, name)), strings.Repeat(letter, maxDishStrRunes+1)) {
+				t.Fatalf("%s carries a %s-run longer than the cap", name, letter)
+			}
+		}
 	}
 }
 
@@ -808,5 +877,11 @@ func TestNotADishAnswer(t *testing.T) {
 				t.Fatalf("lastDishOK = %v, want untouched %d", link["lastDishOK"], now.Unix()-10)
 			}
 		})
+	}
+	// The other way this field gets text is an RPC failure, and that text is
+	// the peer's own: the whole "code: message" is clipped on the way in.
+	code := "Unknown: "
+	if got, want := rpcErr(status.Error(codes.Unknown, strings.Repeat("e", 1000))), code+strings.Repeat("e", maxRPCErrorRunes-len(code)); got != want {
+		t.Fatalf("rpcErr = %d runes, want %d (code + message, clipped as a whole)", len(got), len(want))
 	}
 }

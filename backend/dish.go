@@ -74,15 +74,18 @@ func (d *daemon) adoptLastDish(now time.Time) {
 	if !ok || dc.LastDish == "" {
 		return
 	}
-	p := d.partitionDir(dc.LastDish)
+	// config.json is the daemon's own file, but this keeps the invariant
+	// absolute: d.dishID only ever holds a clipped id, whatever it says.
+	id := clip(dc.LastDish, maxDishStrRunes)
+	p := d.partitionDir(id)
 	if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
 		return
 	}
-	d.dishID = dc.LastDish
+	d.dishID = id
 	d.dishDir = p
 	d.loadDaily()
 	d.initDay(now)
-	d.vlog("dish: adopted partition %s (%s)", dishDirName(dc.LastDish), dc.LastDish)
+	d.vlog("dish: adopted partition %s (%s)", dishDirName(id), id)
 }
 
 // switchDish moves all dish-derived accumulated state to the partition of

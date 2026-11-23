@@ -66,6 +66,28 @@ func TestFetchGeoHTTPBoundary(t *testing.T) {
 			}
 		})
 	}
+	// The provider's strings are the provider's to size, and each lands in
+	// every status.json until the next lookup: oversized and control-laden
+	// values are clipped at the boundary, never copied whole. The leading
+	// ESC / newline are dropped before the cap counts, so the kept text is
+	// the full cap of clean runes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ip":"` + strings.Repeat("1", 300) + `","city":"\u001b` + strings.Repeat("c", 300) +
+			`","region_name":"` + strings.Repeat("r", 300) + `","country_iso":"` + strings.Repeat("U", 40) +
+			`","asn":"` + strings.Repeat("A", 64) + `","asn_org":"\n` + strings.Repeat("o", 300) + `"}`))
+	}))
+	defer srv.Close()
+	if g, err := fetchGeoURL(t0, srv.URL); err != nil || g != (geoInfo{
+		Ts:      t0.Unix(),
+		IP:      strings.Repeat("1", maxGeoIPRunes),
+		City:    strings.Repeat("c", maxGeoTextRunes),
+		Region:  strings.Repeat("r", maxGeoTextRunes),
+		Country: strings.Repeat("U", maxGeoCountryRunes),
+		ASN:     strings.Repeat("A", maxGeoASNRunes),
+		Org:     strings.Repeat("o", maxGeoTextRunes),
+	}) {
+		t.Fatalf("oversize geo = %+v, %v", g, err)
+	}
 	if redirected.Load() {
 		t.Fatal("redirect destination was contacted")
 	}

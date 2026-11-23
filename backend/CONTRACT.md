@@ -43,7 +43,9 @@ the window is the day-history retention.
 Amendment (2026-11-23, marketplace review of v1.6.0): the obstruction map is
 bounded at the dish trust boundary — a coherent grid of at most 256x256
 cells and 1 MiB per reply ("Security hardening") — because the shell
-re-parses hist.json every 2 s while the dashboard is open. The daemon also
+re-parses hist.json every 2 s while the dashboard is open. Strings the dish
+and the egress provider send are clipped to rune caps, and the dish-reported
+outage list is bounded at ingestion (same section). The daemon also
 publishes its resolved state directory as the symlink
 `$XDG_RUNTIME_DIR/starlinkd` ("State directory"), so the QML consumers follow
 a non-default `XDG_STATE_HOME`. No file shape changes.
@@ -331,6 +333,22 @@ line and rejects oversize commands; state files are mode 0600 and state
 directories 0700; history-array values outside int range clamp to a full
 ring re-read; the systemd user unit sets NoNewPrivileges/ProtectSystem/
 PrivateTmp/RestrictAddressFamilies/MemoryMax.
+
+Strings the peers send are clipped, never copied whole (2026-11-23): the bar
+re-parses status.json every 2 s even with the panel closed, and the dish's
+device id / hardware / software strings, the RPC error text, and every egress
+field are the peers' to size. Each is cut to a rune cap — `dish.id`, `hw`
+and `sw` 64 (real values: 26, 17, 18); the RPC error, the whole
+"code: message", 200, in `error`; `geo.ip` 64, `geo.city`/`region`/`org`
+128, `geo.country` 16, `geo.asn` 32 — after dropping control characters
+(Unicode Cc) and invalid UTF-8, never splitting a rune. Clipping truncates,
+it does not reject: the surrounding answer stands. The clipped id is the only
+id the daemon ever uses — the identity comparison, `dish.id`, config.json
+`lastDish` (written and read), events.jsonl `dish_switch`, the partition key
+and the notification text all derive from one conversion — so two ids that
+differ only past the cap are one dish. Dish-reported outages are bounded at
+ingestion to the newest 100 by start time, whatever order the dish delivered
+them; what hist.json re-sorts per active tick never exceeds that.
 
 ## Field mapping ground truth (from testdata)
 
