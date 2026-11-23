@@ -23,10 +23,17 @@ func stateDir() (string, error) {
 		if !filepath.IsAbs(dir) {
 			return "", fmt.Errorf("STARLINKD_STATE_DIR %q is not an absolute path", dir)
 		}
+		// The directory is the user's choice, so its mode is too. MkdirAll
+		// gives 0700 only to directories it creates; an existing one is
+		// returned as it is and never chmod'ed — it may be one other people
+		// or tools rely on, and Chmod would follow a symlink to do it. The
+		// content is protected regardless: every state file is written 0600
+		// by atomicWrite, and the event log is tightened through its own
+		// descriptor. (The default path below is tightened on purpose.)
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return "", err
 		}
-		return dir, os.Chmod(dir, 0o700)
+		return dir, nil
 	}
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
