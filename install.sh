@@ -46,7 +46,7 @@ while :; do
     owner="${meta%% *}"
     mode="${meta##* }"
     if [[ $owner != "0" && $owner != "$EUID" ]]; then
-        remedy="sudo chown \"${USER:-$EUID}\" \"$dir\""
+        remedy="chown \"${USER:-$EUID}\" \"$dir\" (as the administrator)"
     elif (( 8#$mode & 022 )); then
         remedy="chmod go-w \"$dir\""
     else
