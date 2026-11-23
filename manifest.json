@@ -2,8 +2,9 @@
   "schemaVersion": 1,
   "id": "io.github.nulluserid.dishy",
   "name": "Dishy",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "author": "nulluserid",
+  "license": "MIT",
   "description": "Starlink dish status in the bar with a live dashboard popup",
   "kinds": [
     "bar-widget"
