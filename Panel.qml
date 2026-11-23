@@ -2,11 +2,15 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
 // Starlink dashboard. status.json flows in from the bar widget (injected as
-// `status`); hist.json is read ONLY while the panel is open (on open + 2s).
+// `status`); hist.json is read ONLY while the panel is open (on open + 2s),
+// from the daemon's state dir as the bar widget resolved it.
 Panel {
   id: root
   moduleName: "io.github.nulluserid.dishy"
@@ -19,9 +23,14 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property color fg: root.barForeground
-  readonly property color dim: Color.muted
+  readonly property color dim: Commons.Color.muted
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/starlinkd"
+  // The daemon's state dir as the bar widget resolved it (it follows the
+  // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
+  // once the daemon has published it). A binding, not a constant: a late
+  // switch in the bar widget rebinds histFile/dayFile with it.
+  readonly property string stateDir: root.hostWidget ? root.hostWidget.stateDir
+    : Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
   readonly property string binPath: decodeURIComponent(
     Qt.resolvedUrl("backend/bin/starlinkd").toString().replace(/^file:\/\//, ""))
 
@@ -31,28 +40,44 @@ Panel {
   readonly property string level: status ? status.level : "none"
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Color.urgent : Color.muted
+    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
   readonly property bool hasData: s !== null && !sStale
 
-  // hist.json: parsed only while open; null = unreadable/missing.
+  // hist.json: parsed only while open; null = unreadable, oversize or
+  // malformed.
+  // map is its obstruction map after Model.validMap (null when absent or
+  // rejected). It is replaced only when the content differs, so the Canvas
+  // repaints on a real change — the daemon refreshes the map every 60 s —
+  // and not on every 2 s reload, whose parse yields a fresh, identical array.
   property var h: null
+  property var map: null
   function reloadHist() {
     try {
       histFile.reload()
-      root.h = Model.parse(histFile.text())
+      // Bounded and shape-checked: the dish endpoint behind this file is
+      // unauthenticated, so one past the daemon's contract size is dropped
+      // before the parse and one whose series are not the ring's is dropped
+      // after it — both as unreadable, so the loops over h scale with the
+      // ring, never with the file.
+      root.h = Model.validHist(Model.parseBounded(histFile.text(), Model.MAX_HIST_CHARS))
     } catch (e) {
       root.h = null
     }
+    var next = Model.validMap(root.h ? root.h.map : null)
+    if (!Model.sameMap(root.map, next)) root.map = next
   }
 
-  // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
-  // Lives in the current dish's partition (CONTRACT.md v4); the stamp
-  // re-binds at local midnight and the path follows the dish identity.
+  // day-YYYYMMDD.json: per-minute day aggregates, read only while open;
+  // null = unreadable/missing/oversize (empty Today graph).
+  // Lives in the current dish's partition (CONTRACT.md v4): the daemon's
+  // own `dish.dir` names it (Model.dishDir), which during an identity switch
+  // is the current dish's partition, not the pending id's. Only older
+  // daemons lack the field; they get the sanitized id as a fallback.
+  // The stamp re-binds at local midnight; the path follows the dish.
   property var dayData: null
   property string dayStamp: Qt.formatDateTime(new Date(), "yyyyMMdd")
   readonly property string dayPath: {
-    var id = s && s.dish ? String(s.dish.id || "") : ""
-    var dir = id !== "" ? Model.dishDirName(id) : ""
+    var dir = Model.dishDir(s)
     return root.stateDir + (dir !== "" ? "/dishes/" + dir : "")
       + "/day-" + root.dayStamp + ".json"
   }
@@ -60,7 +85,7 @@ Panel {
     root.dayStamp = Qt.formatDateTime(new Date(), "yyyyMMdd")
     try {
       dayFile.reload()
-      root.dayData = Model.parse(dayFile.text())
+      root.dayData = Model.parseBounded(dayFile.text(), Model.MAX_DAY_CHARS)
     } catch (e) {
       root.dayData = null
     }
@@ -132,6 +157,7 @@ Panel {
   function close() {
     root.controller.hide()
     root.h = null
+    root.map = null
     root.ctlResult = ""
     root.armedAction = ""
   }
@@ -149,7 +175,7 @@ Panel {
     var p50 = lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50)
     var p95 = lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
     var g = []
-    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Color.muted) })
+    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Commons.Color.muted) })
     if (p95 !== null) g.push({ value: p95, label: "p95 " + Math.round(p95), color: Model.WARN_HEX })
     return g
   }
@@ -308,7 +334,8 @@ Panel {
             spacing: Style.space(5)
 
             Repeater {
-              model: root.hasData && s.alerts ? s.alerts : []
+              // Capped (Model.MAX_ALERTS): the chips are rebuilt on every tick.
+              model: root.hasData ? Model.alertList(s) : []
 
               Rectangle {
                 required property var modelData
@@ -408,7 +435,7 @@ Panel {
                 values: Model.decimate(h ? h.latencyMs : [], width)
                 guides: root.latencyGuides
                 autoScale: true
-                lineColor: Color.accent
+                lineColor: Commons.Color.accent
               }
 
               DropStrip {
@@ -471,7 +498,7 @@ Panel {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.downMbps : [], width)
                   maxValue: root.throughputMax
-                  lineColor: Color.accent
+                  lineColor: Commons.Color.accent
                   area: true
                 }
 
@@ -600,10 +627,10 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   width: Style.space(84)
                   height: Style.space(84)
-                  snr: h && h.map ? h.map.snr : []
-                  rows: h && h.map ? h.map.rows : 0
-                  cols: h && h.map ? h.map.cols : 0
-                  maxThetaDeg: h && h.map ? h.map.maxThetaDeg : 90
+                  snr: root.map ? root.map.snr : []
+                  rows: root.map ? root.map.rows : 0
+                  cols: root.map ? root.map.cols : 0
+                  maxThetaDeg: root.map ? root.map.maxThetaDeg : 90
                   baseColor: root.dim
                 }
 
@@ -617,7 +644,7 @@ Panel {
                       { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
                       { label: "Time", value: Model.humanDur(s.obs.timeObstructedS) },
                       { label: "Valid", value: Model.humanDur(s.obs.validS) },
-                      { label: "FoV", value: "θ ≤ " + (h && h.map ? h.map.maxThetaDeg : 90) + "°" }
+                      { label: "FoV", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
                     ] : []
 
                     KVRow {
@@ -777,7 +804,7 @@ Panel {
               text: root.ctlResult
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              color: root.ctlBusy ? root.dim : (root.ctlFailed ? Color.urgent : Model.OK_HEX)
+              color: root.ctlBusy ? root.dim : (root.ctlFailed ? Commons.Color.urgent : Model.OK_HEX)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -827,13 +854,21 @@ Panel {
     command: []
   }
 
-  FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true }
-  FileView { id: dayFile; path: root.dayPath; blockLoading: true }
+  // Neither read here logs a failure: a missing file is normal — hist.json
+  // until the daemon's first dashboard-open tick, a day file until the first
+  // minute of the day has been written — and Quickshell would log a load
+  // error on every such reload.
+  FileView { id: histFile; path: root.stateDir + "/hist.json"; blockLoading: true; printErrors: false }
+  FileView { id: dayFile; path: root.dayPath; blockLoading: true; printErrors: false }
 
   Process {
     id: ctl
     property string action: ""
     command: []
+    // STARLINKD_STATE_DIR, as in the bar widget's hostSet: the controls read
+    // config.json for their target, so the CLI is pointed at the directory
+    // this panel reads.
+    environment: ({ STARLINKD_STATE_DIR: root.stateDir })
     stdout: StdioCollector { onStreamFinished: root.ctlOutput = text.trim() }
     stderr: StdioCollector { onStreamFinished: root.ctlErrText = text.trim() }
     onExited: function(exitCode) {
@@ -893,7 +928,7 @@ Panel {
       guides: gs.guides
       autoScale: gs.autoScale
       maxValue: gs.maxValue
-      lineColor: Color.accent
+      lineColor: Commons.Color.accent
     }
   }
 
@@ -943,16 +978,16 @@ Panel {
     implicitWidth: cbLabel.implicitWidth + Style.space(12)
     implicitHeight: Style.space(26)
     radius: Style.space(6)
-    color: armed ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18) : "transparent"
+    color: armed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18) : "transparent"
     border.width: 1
-    border.color: armed ? Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+    border.color: armed ? Commons.Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
 
     Text {
       id: cbLabel
       anchors.centerIn: parent
       text: cb.armed ? "Confirm?" : cb.title
       textFormat: Text.PlainText
-      color: cb.armed ? Color.urgent : root.fg
+      color: cb.armed ? Commons.Color.urgent : root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
     }
@@ -985,7 +1020,7 @@ Panel {
       ctx.fillStyle = Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
       ctx.fillRect(0, 0, width, height)
       var step = width / drops.length
-      ctx.fillStyle = String(Color.urgent)
+      ctx.fillStyle = String(Commons.Color.urgent)
       for (var i = 0; i < drops.length; i++) {
         if (drops[i] === 1) ctx.fillRect(i * step, 0, Math.max(1, step), height)
       }

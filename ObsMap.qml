@@ -1,5 +1,8 @@
 import QtQuick
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // Sky-coverage reticle over hist.map. On current Mini firmware the map is
@@ -15,7 +18,7 @@ Canvas {
   property int rows: 0
   property int cols: 0
   property real maxThetaDeg: 90
-  property color baseColor: Color.muted
+  property color baseColor: Commons.Color.muted
 
   implicitHeight: 140
 
@@ -30,10 +33,12 @@ Canvas {
     var ctx = getContext("2d")
     ctx.reset()
     if (width <= 0 || height <= 0 || rows <= 0 || cols <= 0 || !snr.length) return
-    // Defense in depth: rows/cols come from a daemon-parsed dish response.
-    // A hostile or incoherent grid (declared cells exceeding the delivered
-    // data, or absurd dims) must never drive this GUI-thread loop.
-    if (rows * cols > snr.length || rows > 1024 || cols > 1024) return
+    // Defense in depth: the panel binds only a Model.validMap() map, but
+    // this loop is the GUI-thread cost, so the daemon's contract is checked
+    // again here — rows and cols within MAX_MAP_DIM, and exactly rows*cols
+    // cells. A hostile or incoherent grid must never drive it.
+    if (rows > Model.MAX_MAP_DIM || cols > Model.MAX_MAP_DIM) return
+    if (rows * cols !== snr.length) return
     var size = Math.min(width, height)
     var ox = (width - size) / 2
     var oy = (height - size) / 2

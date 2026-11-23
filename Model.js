@@ -4,9 +4,33 @@
 // (backend/CONTRACT.md). Everything degrades to placeholders, never throws.
 
 // Status colors that have no omarchy theme token (palette only defines
-// accent/urgent/muted). Red/gray map to Color.urgent/Color.muted in QML.
+// accent/urgent/muted). Red/gray map to Commons.Color.urgent/.muted in QML
+// (the palette is qualified there: Qt 6.12's own `Color` takes the bare name).
 var OK_HEX = "#7cb342"
 var WARN_HEX = "#ffa000"
+
+// Ceilings, in chars, for the state files the shell parses on the GUI
+// thread: each is the daemon's contract size with generous headroom
+// (backend/CONTRACT.md). They sit above the conforming maximum of each
+// file — refusing one the daemon may legally write would blank the
+// dashboard, not bound it. A file past its ceiling is not one our daemon
+// wrote — parseBounded refuses it before JSON.parse. Defense in depth
+// behind the daemon, which caps what it writes from the unauthenticated
+// dish endpoint.
+var MAX_STATUS_CHARS = 65536   // status.json, ~1.5KB, parsed on every tick
+var MAX_HIST_CHARS = 786432    // hist.json, ~60KB on a real dish, ≈ 506KB at the conforming max
+var MAX_DAY_CHARS = 262144     // day-YYYYMMDD.json, 1440 minute records ≈ 110KB
+var MAX_CONFIG_CHARS = 4096    // config.json, a target and a dish id
+
+// The obstruction map's bound (hist.json `map`): at most MAX_MAP_DIM x
+// MAX_MAP_DIM cells, which is what keeps hist.json under MAX_HIST_CHARS.
+// Consumers refuse to draw anything beyond it.
+var MAX_MAP_DIM = 256
+
+// Alerts from status.json the shell will ever look at. The daemon emits at
+// most 19 (one per dish alert flag); the cap keeps every loop over them —
+// tooltip, bar level, the panel's chips — from scaling with file content.
+var MAX_ALERTS = 64
 
 function parse(text) {
   try {
@@ -15,6 +39,15 @@ function parse(text) {
   } catch (e) {
     return null
   }
+}
+
+// parse() for a daemon-written file, refused as unreadable (null) when the
+// text runs past maxChars — one of the MAX_*_CHARS ceilings. The length
+// check runs before JSON.parse: the shell reads these files on the GUI
+// thread (status.json on every tick), so a file the daemon could not have
+// written is never parsed there.
+function parseBounded(text, maxChars) {
+  return String(text).length > maxChars ? null : parse(text)
 }
 
 function num(v, fallback) {
@@ -39,12 +72,20 @@ function isOffNetwork(status) {
   return !!link && link.onStarlink === false
 }
 
+// status.alerts, capped at its first MAX_ALERTS entries. Not an array reads
+// as none.
+function alertList(status) {
+  var alerts = status ? status.alerts : null
+  if (!Array.isArray(alerts)) return []
+  return alerts.length > MAX_ALERTS ? alerts.slice(0, MAX_ALERTS) : alerts
+}
+
 // Every alert the dish currently reports, as labels — the full set, shown in
 // the tooltip so nothing the dish knows stays hidden from the user.
 function allAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     out.push(a.label ? String(a.label) : titleCase(id))
@@ -57,8 +98,8 @@ function allAlertLabels(status) {
 // not turn the bar amber.
 function actionAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     if (id === "is_heating" || id === "is_power_save_idle") continue
@@ -160,6 +201,71 @@ function decimate(values, buckets) {
   return out
 }
 
+// hist.json after parseBounded, or null when its shape is off: n an integer
+// in 1..900 (the daemon's ring is fixed at 900; CONTRACT.md: all five series
+// have exactly n entries), each of the five series an array of exactly n
+// entries that are null or finite numbers, intervalS a finite number > 0 and
+// ts a finite number. The panel walks these arrays on every 2 s reload, so
+// they must scale with the ring, never with the file: a tampered hist.json
+// degrades exactly like an unreadable one.
+function validHist(h) {
+  if (!h || typeof h !== "object") return null
+  var n = h.n
+  if (typeof n !== "number" || !isFinite(n) || Math.floor(n) !== n) return null
+  if (n < 1 || n > 900) return null
+  if (typeof h.intervalS !== "number" || !isFinite(h.intervalS) || h.intervalS <= 0) return null
+  if (typeof h.ts !== "number" || !isFinite(h.ts)) return null
+  var names = ["latencyMs", "downMbps", "upMbps", "powerW", "dropRate"]
+  for (var i = 0; i < names.length; i++) {
+    var series = h[names[i]]
+    if (!Array.isArray(series) || series.length !== n) return null
+    for (var j = 0; j < series.length; j++) {
+      var v = series[j]
+      if (v !== null && (typeof v !== "number" || !isFinite(v))) return null
+    }
+  }
+  return h
+}
+
+// hist.json `map` as ObsMap draws it — {rows, cols, maxThetaDeg, snr} with
+// rows/cols integers in 1..MAX_MAP_DIM and snr exactly rows*cols finite
+// values in [-1, 1] — or null. maxThetaDeg is the map's own finite number,
+// 90 when missing or invalid. Never throws, so no hostile shape reaches the
+// Canvas loop.
+function validMap(m) {
+  if (!m || typeof m !== "object") return null
+  var rows = m.rows
+  var cols = m.cols
+  // Integers only (JSON 123.0 is 123; 123.5, strings and null are not dims).
+  if (typeof rows !== "number" || !isFinite(rows) || Math.floor(rows) !== rows) return null
+  if (typeof cols !== "number" || !isFinite(cols) || Math.floor(cols) !== cols) return null
+  if (rows < 1 || rows > MAX_MAP_DIM || cols < 1 || cols > MAX_MAP_DIM) return null
+  var snr = m.snr
+  if (!Array.isArray(snr) || snr.length !== rows * cols) return null
+  for (var i = 0; i < snr.length; i++) {
+    var v = snr[i]
+    if (typeof v !== "number" || !isFinite(v) || v < -1 || v > 1) return null
+  }
+  var theta = m.maxThetaDeg
+  if (typeof theta !== "number" || !isFinite(theta)) theta = 90
+  return { rows: rows, cols: cols, maxThetaDeg: theta, snr: snr }
+}
+
+// True when two validMap() results draw the same picture: both null, or
+// equal rows/cols/maxThetaDeg and an element-wise equal snr. Every hist.json
+// reload parses a fresh array, so identity cannot answer this.
+function sameMap(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.rows !== b.rows || a.cols !== b.cols || a.maxThetaDeg !== b.maxThetaDeg) return false
+  var x = a.snr
+  var y = b.snr
+  if (!x || !y || x.length !== y.length) return false
+  for (var i = 0; i < x.length; i++) {
+    if (x[i] !== y[i]) return false
+  }
+  return true
+}
+
 // "City, Region, CC" from the daemon's egress lookup; null when unknown.
 function geoPlace(geo) {
   var parts = geo ? [geo.city, geo.region, geo.country] : []
@@ -169,14 +275,86 @@ function geoPlace(geo) {
   return out.length ? out.join(", ") : null
 }
 
-// Dish partition directory for a dish id — mirror of starlinkd's
-// dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only (anything else
-// becomes "-"), capped at 64 chars, "."/".."/"" mapped to "unknown" so a
-// hostile id cannot escape the dishes/ directory.
+// Fallback partition directory for a dish id — for status.json without
+// `dish.dir`, i.e. older daemons (see dishDir). A re-implementation of
+// starlinkd's dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only
+// (anything else becomes "-"), capped at 64 chars, "."/".."/"" mapped to
+// "unknown" so a hostile id cannot escape the dishes/ directory. It counts
+// UTF-16 units where Go counts runes, so a non-ASCII id can name a
+// partition the daemon never wrote — which is why the daemon's own name is
+// preferred.
 function dishDirName(id) {
   var s = String(id || "").toLowerCase().replace(/[^a-z0-9._-]/g, "-").substring(0, 64)
   if (s === "" || s === "." || s === "..") return "unknown"
   return s
+}
+
+// Partition directory of the dish a status.json describes (CONTRACT.md v4:
+// dishes/<dir>/ under the state dir); "" when no dish is known. The
+// daemon's own `dish.dir` is used when it is a sane name: it is the
+// partition the daemon is ACTUALLY writing, which during an identity switch
+// is the current dish's, not the pending id's. Older daemons do not publish
+// it, and only then does the sanitized id stand in (dishDirName).
+function dishDir(status) {
+  var dish = status && status.dish ? status.dish : null
+  var dir = dish ? dish.dir : null
+  var id = dish ? String(dish.id || "") : ""
+  var fallback = id !== "" ? dishDirName(id) : ""
+  if (typeof dir !== "string" || !/^[a-z0-9._-]{1,64}$/.test(dir)) return fallback
+  return dir === "." || dir === ".." ? fallback : dir
+}
+
+// The daemon's state dir — mirror of its XDG_STATE_HOME handling: a set
+// XDG_STATE_HOME wins, else ~/.local/state under the home dir.
+function stateDirFor(xdgStateHome, home) {
+  return (xdgStateHome || home + "/.local/state") + "/starlinkd"
+}
+
+// Where the daemon publishes its real state dir as a symlink at start —
+// absent until it has run this session, and nowhere to publish when there is
+// no runtime dir: "" then.
+function linkedStateDirFor(xdgRuntimeDir) {
+  return xdgRuntimeDir ? xdgRuntimeDir + "/starlinkd" : ""
+}
+
+// The two sources the daemon's state can be read from: the runtime symlink
+// above, and the XDG_STATE_HOME mirror (stateDirFor).
+var SOURCE_RUNTIME = "runtime"
+var SOURCE_MIRROR = "mirror"
+
+// The source to start on: the daemon's own dir whenever it has published one
+// (hasRuntimeStatus: its status.json is there) — fresh or not, that is where
+// its config.json lives — else the mirror. The ticks take freshness from
+// there.
+function startSource(hasRuntimeStatus) {
+  return hasRuntimeStatus ? SOURCE_RUNTIME : SOURCE_MIRROR
+}
+
+// One tick's choice of source, as a pure decision over an injected reader.
+// read(source) returns the status parsed from that source — null when
+// missing — as the file is NOW; a reader that throws reads as missing. The
+// current source is always read. Only when its status is missing or stale is
+// the other one read, once, and taken only when it is fresh: that read is
+// then the new source's first, so its data shows in this same tick rather
+// than one later, with no third read. When neither is fresh the widget stays
+// where it is, on the stale styling it already has. With hasRuntime false
+// there is no other source to fall over to. Returns { source, status,
+// switched, reads }.
+function pickSource(current, read, nowS, hasRuntime) {
+  var status = null
+  try { status = read(current) } catch (e) { status = null }
+  var result = { source: current, status: status, switched: false, reads: 1 }
+  if (!hasRuntime || !isStale(status, nowS)) return result
+  var other = current === SOURCE_RUNTIME ? SOURCE_MIRROR : SOURCE_RUNTIME
+  var otherStatus = null
+  try { otherStatus = read(other) } catch (e) { otherStatus = null }
+  result.reads = 2
+  if (!isStale(otherStatus, nowS)) {
+    result.source = other
+    result.status = otherStatus
+    result.switched = true
+  }
+  return result
 }
 
 // One-line bar tooltip summary: state + live numbers + every active alert
