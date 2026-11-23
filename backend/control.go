@@ -136,9 +136,15 @@ func loadTargetConfig(dir string) (string, bool) {
 	return t, true
 }
 
-// loadDaemonConfig reads the full persisted configuration.
+// maxConfigBytes caps the config.json the daemon will load. A target is at
+// most 253 bytes and a dish id 64 runes, so anything larger was not written
+// by this daemon and reads as absent, exactly like a corrupt one.
+const maxConfigBytes = 4 << 10
+
+// loadDaemonConfig reads the full persisted configuration; missing, corrupt
+// or oversize reads as absent.
 func loadDaemonConfig(dir string) (daemonConfig, bool) {
-	b, err := os.ReadFile(filepath.Join(dir, configName))
+	b, err := readCapped(filepath.Join(dir, configName), maxConfigBytes)
 	if err != nil {
 		return daemonConfig{}, false
 	}

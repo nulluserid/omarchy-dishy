@@ -66,6 +66,18 @@ func (d *daemon) publishedDir() string {
 	return dishDirName(d.dishID)
 }
 
+// securePartition tightens the dishes/ root and the current dish's partition
+// to 0700 — once, when a partition is created, adopted or switched to, never
+// per tick. Nothing else inside is touched: historical file and directory
+// modes stay exactly as they are (a recorded decision).
+func (d *daemon) securePartition() {
+	for _, p := range []string{filepath.Join(d.cfg.dir, dishesDirName), d.dishDir} {
+		if err := os.Chmod(p, 0o700); err != nil {
+			d.vlog("chmod %s: %v", p, err)
+		}
+	}
+}
+
 // statDir is where THIS dish's accumulated state files go: the dish's
 // partition once an identity is known, the state root before that (startup
 // fail ticks with no evidence yet).
@@ -94,6 +106,7 @@ func (d *daemon) adoptLastDish(now time.Time) {
 	}
 	d.dishID = id
 	d.dishDir = p
+	d.securePartition()
 	d.loadDaily()
 	d.initDay(now)
 	d.vlog("dish: adopted partition %s (%s)", dishDirName(id), id)
@@ -161,6 +174,7 @@ func (d *daemon) switchDish(now time.Time, id, hw string) {
 	if err := os.MkdirAll(d.dishDir, 0o700); err != nil {
 		d.vlog("partition %s: %v", dishDirName(id), err)
 	}
+	d.securePartition()
 	d.pendingID, d.pendingIDTicks = "", 0
 	d.lastOutageAnnounce = 0
 	d.daily = dailyFile{} // replaced by the partition's counters below

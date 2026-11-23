@@ -390,6 +390,15 @@ clamp to a full
 ring re-read; the systemd user unit sets NoNewPrivileges/ProtectSystem/
 PrivateTmp/RestrictAddressFamilies/MemoryMax.
 
+State-dir writes and loads are hardened the same way (2026-11-23): a state
+file is written through a uniquely named temp file in its own directory, so
+nothing planted at a predictable name is opened or followed; events.jsonl is
+opened O_NOFOLLOW and a symlink there is refused, never followed; the files
+the daemon loads are read capped — config.json 4 KiB, daily.json 16 KiB,
+day-*.json 256 KiB — and a larger one is treated exactly like a corrupt one;
+the dishes/ root and a partition directory are 0700 when created, adopted or
+switched to, and no other historical file or directory mode is rewritten.
+
 Strings the peers send are clipped, never copied whole (2026-11-23): the bar
 re-parses status.json every 2 s even with the panel closed, and the dish's
 device id / hardware / software strings, the RPC error text, and every egress

@@ -99,6 +99,9 @@ func TestDishSwitchPartitionsKeepStats(t *testing.T) {
 	if dfa2["totalS"].(float64) != 4 {
 		t.Fatalf("dish A daily mutated by the switch: %v", dfa2)
 	}
+	// A switch creates the partition with 0700, like the dishes/ root above it.
+	assertMode(t, partB, 0o700)
+	assertMode(t, filepath.Join(dir, "dishes"), 0o700)
 	// The switch is logged and remembered for the next start.
 	ev := readFile(t, filepath.Join(dir, "events.jsonl"))
 	if !strings.Contains(ev, `"type":"dish_switch","from":"ut-aaa","to":"ut-bbb"`) {
@@ -438,6 +441,9 @@ func TestAdoptLastDish(t *testing.T) {
 	if d2.dishID != "ut-bbb" || d2.statDir() != partB {
 		t.Fatalf("adopt: id=%q dir=%q", d2.dishID, d2.statDir())
 	}
+	// Adopting tightens the dishes/ root and the partition to 0700, once.
+	assertMode(t, filepath.Join(dir, "dishes"), 0o700)
+	assertMode(t, partB, 0o700)
 	d2.loadDaily()
 	if d2.daily.DownBytes != 4242 {
 		t.Fatalf("adopted daily = %+v, want the partition's counters", d2.daily)

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -108,28 +109,35 @@ func publishStateDir(dir string) error {
 }
 
 // atomicWrite writes via tmp+rename so consumers never see partial files.
+// The temp file is created fresh under a unique name in the destination
+// directory (0600 by construction), so nothing planted at a predictable name
+// is ever opened or followed; it is renamed into place, and removed whenever
+// any step fails. The name is "<base>.tmp-<random>", which the day-file
+// pruning pattern (day-YYYYMMDD.json, exact length) cannot match.
 // Mode 0600: state files carry the machine's public IP and location metadata.
 func atomicWrite(path string, data []byte) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	f, err := os.CreateTemp(dir, base+".tmp-*")
 	if err != nil {
 		return err
 	}
-	if err := f.Chmod(0o600); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
+	tmp := f.Name()
+	if err := f.Chmod(0o600); err == nil {
+		_, err = f.Write(data)
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
 	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
+	if err == nil {
+		err = os.Rename(tmp, path)
 	}
-	return os.Rename(tmp, path)
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }
 
 // marshalCompact serializes v; a marshal failure is returned, never
@@ -182,21 +190,57 @@ func (d *daemon) writeStat(name string, v any) {
 	}
 }
 
-// ensureStatDir creates the current dish's partition directory when missing.
+// ensureStatDir creates the current dish's partition directory when missing
+// — and tightens it then, once, the way a switch does. An existing directory
+// is left alone: this runs on every tick.
 func (d *daemon) ensureStatDir() {
-	if d.dishDir != "" {
-		os.MkdirAll(d.dishDir, 0o700)
+	if d.dishDir == "" {
+		return
+	}
+	if _, err := os.Stat(d.dishDir); err == nil {
+		return
+	}
+	if err := os.MkdirAll(d.dishDir, 0o700); err == nil {
+		d.securePartition()
 	}
 }
 
+// maxDailyBytes caps the daily.json the daemon will load. The one it writes
+// is a few hundred bytes; anything larger was not written by this daemon.
+const maxDailyBytes = 16 << 10
+
+// readCapped reads a state file the daemon is about to LOAD and refuses more
+// than max bytes. Every writer here is bounded, so a larger file is not one
+// this daemon wrote: it is reported as an error, and the caller treats it
+// exactly like any other unreadable file.
+func readCapped(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s: larger than %d bytes", filepath.Base(path), max)
+	}
+	return b, nil
+}
+
 // loadDaily restores the current dish's usage counters; missing/corrupt
-// starts fresh. A file without a retention stamp (≤ v1.4 partition, legacy
+// starts fresh — as does a file too large to be one this daemon wrote.
+// A file without a retention stamp (≤ v1.4 partition, legacy
 // root file) is seeded from its mtime: the stamp then freezes and the
 // retention sweep ages the dish out from load time even though later writes
 // (including fail ticks) rewrite the file.
 func (d *daemon) loadDaily() {
-	b, err := os.ReadFile(filepath.Join(d.statDir(), "daily.json"))
+	b, err := readCapped(filepath.Join(d.statDir(), "daily.json"), maxDailyBytes)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			d.vlog("daily.json: %v (starting fresh)", err)
+		}
 		return
 	}
 	var df dailyFile
@@ -231,25 +275,33 @@ func (d *daemon) rollDaily(now time.Time) {
 }
 
 // appendEvent appends one JSONL event, rotating to events.old.jsonl first
-// when the file exceeds 512KB.
+// when the file exceeds 512KB. The log is opened with O_NOFOLLOW and only
+// ever touched through that descriptor: a symlink planted at events.jsonl
+// is refused with an error instead of followed.
 func appendEvent(dir string, ev event) error {
 	p := filepath.Join(dir, "events.jsonl")
-	// Tighten a legacy event file before it can become the rotated file.
-	if err := os.Chmod(p, 0o600); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	if fi, err := os.Stat(p); err == nil && fi.Size() > maxEventBytes {
-		if err := os.Rename(p, filepath.Join(dir, "events.old.jsonl")); err != nil {
-			return fmt.Errorf("rotate: %w", err)
-		}
-	}
 	b, err := json.Marshal(ev)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	f, err := openEventLog(p)
 	if err != nil {
 		return err
+	}
+	// An oversize log rotates. It is tightened through the descriptor
+	// first, so a legacy mode never survives into the rotated file.
+	if fi, serr := f.Stat(); serr == nil && fi.Size() > maxEventBytes {
+		cerr := f.Chmod(0o600)
+		f.Close()
+		if cerr != nil {
+			return cerr
+		}
+		if err := os.Rename(p, filepath.Join(dir, "events.old.jsonl")); err != nil {
+			return fmt.Errorf("rotate: %w", err)
+		}
+		if f, err = openEventLog(p); err != nil {
+			return err
+		}
 	}
 	defer f.Close()
 	if err := f.Chmod(0o600); err != nil {
@@ -257,4 +309,14 @@ func appendEvent(dir string, ev event) error {
 	}
 	_, err = f.Write(append(b, '\n'))
 	return err
+}
+
+// openEventLog opens the event log for appending, creating it 0600. A
+// symlink at that path is never followed: O_NOFOLLOW makes the open fail.
+func openEventLog(p string) (*os.File, error) {
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY|syscall.O_NOFOLLOW, 0o600)
+	if errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EEXIST) {
+		return nil, fmt.Errorf("%s is a symlink: refusing to append through it", p)
+	}
+	return f, err
 }
