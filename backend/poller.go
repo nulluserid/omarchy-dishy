@@ -222,19 +222,28 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// Obstruction map is only needed for the dashboard: skip entirely while
 	// the panel is closed. On the first open the last map is minutes old —
 	// good enough until the next active due tick refreshes it.
+	//
+	// The refresh clock advances on EVERY completed attempt, whatever came
+	// of it — accepted, refused by validation, refused by the per-call size
+	// cap, timed out, unavailable — so the endpoint is asked at most once
+	// per mapInterval, and a hanging one costs the tick loop at most one RPC
+	// timeout per interval. There is no retry on failure: retrying on the
+	// next tick turned an oversize answer into a per-tick download
+	// (measured: 9 requests in 9 active ticks). Only an accepted map
+	// replaces the last one — last-good-wins, the rule the state files follow
+	// ("a hostile value must not replace previously written state"). A
+	// switch clears the map explicitly, so nothing of the old dish's
+	// survives here. A validation refusal is logged with its reason.
 	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
-		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
-			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes)); m != nil {
-			// A delivered answer always advances the clock — a hostile or odd
-			// endpoint is asked again only every mapInterval — but only an
-			// accepted map replaces the last one: last-good-wins, the rule the
-			// state files follow ("a hostile value must not replace previously
-			// written state"). A switch clears the map explicitly, so nothing
-			// of the old dish's survives here.
-			if om := toObsMap(m.GetDishGetObstructionMap()); om != nil {
-				d.mapData = om
-			}
-			d.lastMap = now
+		m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
+			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes))
+		d.lastMap = now
+		om, why := toObsMap(m.GetDishGetObstructionMap())
+		switch {
+		case om != nil:
+			d.mapData = om
+		case m != nil: // a failed RPC was already logged by fetch
+			d.warn("obstruction_map: rejected (" + why + ")")
 		}
 	}
 
@@ -867,24 +876,38 @@ const (
 	maxObsMapRecvBytes = 1 << 20
 )
 
-// toObsMap converts a dish obstruction map into the published shape. The
-// QML consumer loops rows*cols on the GUI thread (ObsMap.qml), so a response
-// that is not a coherent, bounded grid is rejected WHOLE (nil) rather than
-// truncated or repaired — never trust a partial view of the sky.
-func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
+// toObsMap converts a dish obstruction map into the published shape, or
+// refuses it WHOLE with the reason why. The QML consumer loops rows*cols on
+// the GUI thread (ObsMap.qml), so a response that is not a coherent, bounded
+// grid is rejected rather than truncated or repaired — never trust a partial
+// view of the sky. The reason is what the daemon logs, so a refusal is never
+// silent: an operator reading the log can tell a hostile grid from a dish
+// that changed its format.
+func toObsMap(m *dish.DishGetObstructionMapResponse) (*obsMap, string) {
 	if m == nil {
-		return nil
+		return nil, "no map in the answer"
 	}
 	rows, cols := int(m.GetNumRows()), int(m.GetNumCols())
 	// Dimensions first: rows*cols is evaluated only once both are bounded,
 	// so uint32-max dims can never overflow the product.
-	if rows < 1 || cols < 1 || rows > maxObsMapDim || cols > maxObsMapDim {
-		return nil
+	why := ""
+	switch {
+	case rows < 1:
+		why = fmt.Sprintf("rows %d < 1", rows)
+	case rows > maxObsMapDim:
+		why = fmt.Sprintf("rows %d > %d", rows, maxObsMapDim)
+	case cols < 1:
+		why = fmt.Sprintf("cols %d < 1", cols)
+	case cols > maxObsMapDim:
+		why = fmt.Sprintf("cols %d > %d", cols, maxObsMapDim)
+	}
+	if why != "" {
+		return nil, why
 	}
 	// Exactly the declared grid. The old rule (rows*cols <= len(snr)) let a
 	// response pad the file with every cell it delivered.
-	if len(m.GetSnr()) != rows*cols {
-		return nil
+	if n := len(m.GetSnr()); n != rows*cols {
+		return nil, fmt.Sprintf("%d cells, want rows*cols = %d", n, rows*cols)
 	}
 	snr := make([]float64, rows*cols)
 	for i, v := range m.GetSnr() {
@@ -892,13 +915,13 @@ func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
 		// which would pass a hostile cell off as a clear one instead of
 		// rejecting the map whole, like the history samples are skipped.
 		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
-			return nil
+			return nil, fmt.Sprintf("non-finite cell %v", float64(v))
 		}
 		// CONTRACT.md: 0..1 per cell, -1 = no data. The range check runs on
 		// the rounded value, because that is what gets published.
 		c := round(float64(v), 2)
 		if c < -1 || c > 1 {
-			return nil
+			return nil, fmt.Sprintf("cell %v outside [-1, 1]", c)
 		}
 		snr[i] = c
 	}
@@ -907,7 +930,7 @@ func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
 		Cols:        cols,
 		MaxThetaDeg: round(float64(m.GetMaxThetaDeg()), 1),
 		Snr:         snr,
-	}
+	}, ""
 }
 
 // pct is online/total as a percentage rounded to 2 decimals; 100 when empty.

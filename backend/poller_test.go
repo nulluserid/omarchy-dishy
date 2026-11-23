@@ -761,7 +761,8 @@ func TestControlLineTruncation(t *testing.T) {
 func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 	// The dish endpoint is unauthenticated and the QML consumer loops
 	// rows*cols on the GUI thread, re-parsing hist.json every 2 s: a map
-	// that is not a coherent, bounded grid is rejected whole (nil).
+	// that is not a coherent, bounded grid is rejected whole — never
+	// silently, the reason is what the daemon logs.
 	grid := func(n int, v float32) []float32 {
 		s := make([]float32, n)
 		for i := range s {
@@ -773,28 +774,36 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 		name       string
 		rows, cols uint32
 		snr        []float32
+		why        string // what the logged reason must say
 	}{
-		{"hostile 1e6 dims", 1000000, 1000000, []float32{1}},
-		{"uint32-max dims", math.MaxUint32, math.MaxUint32, []float32{1}},
-		{"zero rows", 0, 4, nil},
-		{"zero cols", 4, 0, nil},
-		{"dim above the bound", maxObsMapDim + 1, 1, grid(maxObsMapDim+1, 0)},
-		{"fewer cells than declared", 4, 4, []float32{1, 2, 3}},
-		{"trailing cells", 4, 4, grid(17, 0)},
-		{"cell above the range", 4, 4, append(grid(15, 0), 1.01)},
-		{"cell below the range", 4, 4, append(grid(15, 0), -1.01)},
+		{"hostile 1e6 dims", 1000000, 1000000, []float32{1}, fmt.Sprintf("rows 1000000 > %d", maxObsMapDim)},
+		{"uint32-max dims", math.MaxUint32, math.MaxUint32, []float32{1}, fmt.Sprintf("rows %d > %d", uint64(math.MaxUint32), maxObsMapDim)},
+		{"zero rows", 0, 4, nil, "rows 0 < 1"},
+		{"zero cols", 4, 0, nil, "cols 0 < 1"},
+		{"dim above the bound", maxObsMapDim + 1, 1, grid(maxObsMapDim+1, 0), fmt.Sprintf("rows %d > %d", maxObsMapDim+1, maxObsMapDim)},
+		{"fewer cells than declared", 4, 4, []float32{1, 2, 3}, "3 cells, want rows*cols = 16"},
+		{"trailing cells", 4, 4, grid(17, 0), "17 cells, want rows*cols = 16"},
+		{"cell above the range", 4, 4, append(grid(15, 0), 1.01), "cell 1.01 outside [-1, 1]"},
+		{"cell below the range", 4, 4, append(grid(15, 0), -1.01), "cell -1.01 outside [-1, 1]"},
 		// Finiteness is judged on the raw cell: round() would turn NaN/Inf
 		// into 0 and pass a hostile cell off as a clear one.
-		{"NaN cell", 1, 2, []float32{float32(math.NaN()), 0}},
-		{"+Inf cell", 1, 2, []float32{float32(math.Inf(1)), 0}},
-		{"-Inf cell", 1, 2, []float32{float32(math.Inf(-1)), 0}},
+		{"NaN cell", 1, 2, []float32{float32(math.NaN()), 0}, "non-finite cell NaN"},
+		{"+Inf cell", 1, 2, []float32{float32(math.Inf(1)), 0}, "non-finite cell +Inf"},
+		{"-Inf cell", 1, 2, []float32{float32(math.Inf(-1)), 0}, "non-finite cell -Inf"},
 	} {
-		if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: tc.rows, NumCols: tc.cols, Snr: tc.snr}); m != nil {
+		m, why := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: tc.rows, NumCols: tc.cols, Snr: tc.snr})
+		if m != nil {
 			t.Errorf("%s: accepted %dx%d", tc.name, m.Rows, m.Cols)
+		} else if !strings.Contains(why, tc.why) {
+			t.Errorf("%s: reason = %q, want it to say %q", tc.name, why, tc.why)
 		}
 	}
+	// A missing map is refused with a reason too: no refusal is silent.
+	if m, why := toObsMap(nil); m != nil || why == "" {
+		t.Fatalf("nil map: %v, %q; want refused with a reason", m, why)
+	}
 	// The real dish shape (CONTRACT.md: 123x123) and a grid at the bound
-	// are accepted with exactly rows*cols rounded cells.
+	// are accepted with exactly rows*cols rounded cells, and no reason.
 	for _, tc := range []struct {
 		name       string
 		rows, cols int
@@ -804,10 +813,13 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 		{"real dish 123x123", 123, 123, -1, -1},
 		{"bound 256x256", maxObsMapDim, maxObsMapDim, 0.1, 0.1},
 	} {
-		m := toObsMap(&dish.DishGetObstructionMapResponse{
+		m, why := toObsMap(&dish.DishGetObstructionMapResponse{
 			NumRows: uint32(tc.rows), NumCols: uint32(tc.cols), MaxThetaDeg: 90, Snr: grid(tc.rows*tc.cols, tc.cell)})
 		if m == nil {
-			t.Fatalf("%s: coherent map rejected", tc.name)
+			t.Fatalf("%s: coherent map rejected: %s", tc.name, why)
+		}
+		if why != "" {
+			t.Fatalf("%s: accepted, yet a reason came back: %q", tc.name, why)
 		}
 		if m.Rows != tc.rows || m.Cols != tc.cols || len(m.Snr) != tc.rows*tc.cols {
 			t.Fatalf("%s: got %dx%d with %d cells", tc.name, m.Rows, m.Cols, len(m.Snr))
@@ -819,8 +831,8 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 		}
 	}
 	// 1 (a valid cell) is accepted like any other, beside the -1 sentinel.
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: 1, NumCols: 2, Snr: []float32{1, -1}}); m == nil || m.Snr[0] != 1 || m.Snr[1] != -1 {
-		t.Fatalf("edge cells: %+v", m)
+	if m, why := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: 1, NumCols: 2, Snr: []float32{1, -1}}); m == nil || why != "" || m.Snr[0] != 1 || m.Snr[1] != -1 {
+		t.Fatalf("edge cells: %+v (%q)", m, why)
 	}
 }
 

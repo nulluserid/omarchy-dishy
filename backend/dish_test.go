@@ -4,6 +4,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,8 +13,28 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
+	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
+
+// mapFailClient is a stub whose obstruction-map RPC always fails — like an
+// endpoint answering oversize (the per-call cap turns that into a failed
+// RPC) or one that times out. asks counts the attempts, so a test can see how
+// often the daemon asked.
+type mapFailClient struct {
+	*stubClient
+	asks int
+}
+
+func (c *mapFailClient) Handle(ctx context.Context, in *api.Request, opts ...grpc.CallOption) (*api.Response, error) {
+	if _, isMap := in.GetRequest().(*api.Request_DishGetObstructionMap); isMap {
+		c.asks++
+		return nil, errors.New("ResourceExhausted: received message larger than max")
+	}
+	return c.stubClient.Handle(ctx, in, opts...)
+}
 
 func TestDishDirName(t *testing.T) {
 	cases := map[string]string{
@@ -234,6 +256,20 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	if d.mapData != kept || !d.lastMap.After(asked) {
 		t.Fatalf("rejected refresh: map %p (want the accepted %p), lastMap %v (want advanced past %v)", d.mapData, kept, d.lastMap, asked)
 	}
+	// A failed attempt waits out the interval just the same — there is no
+	// retry on the next tick. An oversize answer fails the RPC through the
+	// per-call cap, which is what was measured being re-asked on every
+	// active tick.
+	asking := &mapFailClient{stubClient: c}
+	d.client = asking
+	due := d.lastMap.Add(d.cfg.mapInterval).Add(time.Second)
+	d.goodTick(due, c.status, true, false, 2*time.Second)
+	d.goodTick(due.Add(2*time.Second), c.status, true, false, 2*time.Second)
+	if asking.asks != 1 || !d.lastMap.Equal(due) || d.mapData != kept {
+		t.Fatalf("failed map attempt: %d asks over two ticks (want 1, once per mapInterval), lastMap %v (want the attempt at %v), map %p (want %p)",
+			asking.asks, d.lastMap, due, d.mapData, kept)
+	}
+	d.client = c
 }
 
 func TestDishSwitchNoByteBackfill(t *testing.T) {
