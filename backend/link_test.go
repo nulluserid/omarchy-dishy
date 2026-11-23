@@ -407,6 +407,32 @@ func TestUpdateLinkEgressEvidence(t *testing.T) {
 	if d.link.Reason != "grace" {
 		t.Fatalf("stale geo reason = %q, want grace", d.link.Reason)
 	}
+
+	// Lookup cadence (maybeFetchGeo): the transition clock applies only while
+	// classifying. A settled off-network machine — a fresh answer naming
+	// another carrier — is a finished classification and runs on the settled
+	// clock: no lookup at transition age. Keying it on the marker instead
+	// (onStarlink false) asked every 60 s for as long as the machine was away.
+	d.cfg.geoInterval, d.cfg.geoTransitionInterval = 5*time.Minute, time.Minute
+	d.geo = geoInfo{Ts: t0.Unix() - 60, IsStarlink: false, ASN: "AS3320", Org: "Deutsche Telekom"}
+	d.link = linkInfo{OnStarlink: false, Reason: "egress-other", Since: t0.Unix() - 3600}
+	d.maybeFetchGeo(t0, false)
+	if d.geoFetching {
+		t.Fatal("settled off-network answer re-queried on the transition clock, want the settled clock")
+	}
+
+	// Failure backoff: with no answer at all the clock is the transition one,
+	// but a lookup that failed less than geoInterval ago holds it — an
+	// offline machine was otherwise asked on every tick.
+	d.geo = geoInfo{}
+	d.lastGeoFailUnix = t0.Unix() - 4*60
+	d.maybeFetchGeo(t0, false)
+	if d.geoFetching {
+		t.Fatal("lookup started inside the failure backoff")
+	}
+	// Only the negative side is pinned: a started lookup is a real request
+	// leaving the process, so the due cases are covered by the daemon's
+	// verbose log, not here.
 }
 
 func TestApplyGeoDoesNotStampDish(t *testing.T) {

@@ -2,7 +2,7 @@
 // files described in CONTRACT.md: status.json, hist.json, daily.json and
 // events.jsonl. It also offers one-shot control subcommands.
 //
-//	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-once] [-v]
+//	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-idle-exit <duration>] [-once] [-v] [-geo-url https://ifconfig.co/json]
 //	starlinkd stow|unstow|reboot [-t host:port]
 //	starlinkd panel open|close|alive
 //	starlinkd set host <host[:port]>
@@ -15,6 +15,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
@@ -47,6 +48,11 @@ func run(args []string) int {
 	idleInterval := fs.Duration("idle-interval", 10*time.Second, "poll interval while the dashboard is closed")
 	idleHistInterval := fs.Duration("idle-hist-interval", 60*time.Second, "background history refresh while the dashboard is closed")
 	mapInterval := fs.Duration("map-interval", 60*time.Second, "obstruction map refresh interval (dashboard open)")
+	// -geo-url exists for the demo harness alone: a local server answers
+	// with sample egress data, so screenshots never show a real IP or
+	// location. The systemd unit never sets it. It is dialed IPv4 only
+	// (fetchGeoURL): serve it on 127.0.0.1, not [::1].
+	geoURL := fs.String("geo-url", defaultGeoEndpoint, "egress lookup URL (absolute http or https, with a host)")
 	once := fs.Bool("once", false, "run a single tick, write files, print status.json, exit")
 	verbose := fs.Bool("v", false, "log transitions and errors to stderr")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -57,6 +63,14 @@ func run(args []string) int {
 	if *showVersion {
 		fmt.Println("starlinkd " + version)
 		return 0
+	}
+	// -geo-url is validated to exactly this much: an absolute http(s) URL
+	// with a host. Anything else (a relative path, another scheme, no
+	// host) is a usage error, refused before anything dials or creates a
+	// state directory.
+	if u, err := url.Parse(*geoURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		fmt.Fprintln(osStderr, "starlinkd: -geo-url must be an absolute http or https URL with a host")
+		return 2
 	}
 	// Cadence sanity: idle must never be faster than active.
 	if *idleInterval < *interval {
@@ -114,6 +128,7 @@ func run(args []string) int {
 		mapInterval:           *mapInterval,
 		geoInterval:           5 * time.Minute,
 		geoTransitionInterval: 60 * time.Second,
+		geoEndpoint:           *geoURL,
 		once:                  *once,
 		verbose:               *verbose,
 		dir:                   dir,
@@ -144,6 +159,13 @@ func run(args []string) int {
 		return 0
 	}
 
+	// The notification helper is resolved and verified here, once, before
+	// the tick loop — never from ambient PATH at notification time. A
+	// refusal is reported once, unconditionally: the unit does not pass -v,
+	// so notifications stopping would otherwise leave no journal line.
+	if err := d.resolveNotifySend(); err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: notifications disabled: %v\n", err)
+	}
 	if err := d.startControl(); err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: %v (panel wake-ups disabled)\n", err)
 	}
