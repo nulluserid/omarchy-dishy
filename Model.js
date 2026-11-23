@@ -204,10 +204,12 @@ function decimate(values, buckets) {
 // hist.json after parseBounded, or null when its shape is off: n an integer
 // in 1..900 (the daemon's ring is fixed at 900; CONTRACT.md: all five series
 // have exactly n entries), each of the five series an array of exactly n
-// entries that are null or finite numbers, intervalS a finite number > 0 and
-// ts a finite number. The panel walks these arrays on every 2 s reload, so
-// they must scale with the ring, never with the file: a tampered hist.json
-// degrades exactly like an unreadable one.
+// entries that are null or finite numbers, intervalS a finite number > 0,
+// ts a finite number, and outages — absent or null when there are none —
+// at most 20 objects (the daemon emits the newest 20) whose start and durS,
+// when present, are finite numbers. The panel walks these on every 2 s
+// reload, so they must scale with the ring and the daemon's cap, never with
+// the file: a tampered hist.json degrades exactly like an unreadable one.
 function validHist(h) {
   if (!h || typeof h !== "object") return null
   var n = h.n
@@ -222,6 +224,16 @@ function validHist(h) {
     for (var j = 0; j < series.length; j++) {
       var v = series[j]
       if (v !== null && (typeof v !== "number" || !isFinite(v))) return null
+    }
+  }
+  var outages = h.outages
+  if (outages !== undefined && outages !== null) {
+    if (!Array.isArray(outages) || outages.length > 20) return null
+    for (var k = 0; k < outages.length; k++) {
+      var o = outages[k]
+      if (!o || typeof o !== "object" || Array.isArray(o)) return null
+      if (o.start !== undefined && (typeof o.start !== "number" || !isFinite(o.start))) return null
+      if (o.durS !== undefined && (typeof o.durS !== "number" || !isFinite(o.durS))) return null
     }
   }
   return h
