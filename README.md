@@ -119,7 +119,7 @@ The installer refuses other checkouts: the service always runs the canonical
 plugin path above, so running it in a development clone must not silently
 restart a different binary.
 
-The installer trusts no caller `PATH`: it runs root-owned tools from a
+The installer trusts no caller `PATH`: it runs only the standard tools from a
 closed `PATH`, refusing if one is missing; it refuses to write when a
 directory up to `$HOME` is writable by group/others or owned by someone else
 (the message names the fix); and it backs up an existing unit before

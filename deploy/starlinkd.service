@@ -30,7 +30,7 @@ CapabilityBoundingSet=
 PrivateDevices=yes
 SystemCallArchitectures=native
 # -idle-exit 15m (default 0 = never exit): once neither the widget's heartbeat
-# ("starlinkd alive", every 5 min) nor a panel command has arrived for 15 min,
+# ("starlinkd panel alive", every 5 min) nor a panel command has arrived for 15 min,
 # the daemon exits cleanly, so a disabled or removed plugin takes its backend
 # down; the next shell start brings it back.
 ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd -idle-exit 15m
