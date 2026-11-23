@@ -37,6 +37,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -263,9 +264,44 @@ func (d *daemon) fetchGeo(at time.Time) (geoInfo, error) {
 	return fetchGeoURL(at, d.cfg.geoEndpoint)
 }
 
+// geoTransport is http.DefaultTransport in every respect — proxy
+// environment, HTTP/2, timeouts, one pooled connection set — with a single
+// difference: it dials IPv4 only. Built once, like the default itself.
+var geoTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			// Hostnames are resolved by the time Control runs, so `address`
+			// is a candidate IP literal. A refusal makes the dialer move on
+			// to the next resolved address; with none left the dial fails.
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+				return errors.New("egress lookup is IPv4-only")
+			}
+			return nil
+		},
+	}).DialContext
+	return t
+}()
+
+// fetchGeoURL performs one egress GET against `endpoint` over geoTransport.
+//
+// IPv4 only — no flag and no IPv6 fallback. The lookup leaves over IPv4, so
+// the provider sees the IPv4 source address and answers with the IPv4
+// address and its exit POP. An IPv6 answer locates a different exit, one
+// that is far harder to track down. On a network with no IPv4 route the
+// lookup fails and the normal failure backoff applies: no egress line in
+// the panel, and link classification falls back to dish evidence and the
+// grace window.
 func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
+		Transport: geoTransport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

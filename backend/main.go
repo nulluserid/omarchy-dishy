@@ -49,7 +49,8 @@ func run(args []string) int {
 	mapInterval := fs.Duration("map-interval", 60*time.Second, "obstruction map refresh interval (dashboard open)")
 	// -geo-url exists for the demo harness alone: a local server answers
 	// with sample egress data, so screenshots never show a real IP or
-	// location. The systemd unit never sets it.
+	// location. The systemd unit never sets it. It is dialed IPv4 only
+	// (fetchGeoURL): serve it on 127.0.0.1, not [::1].
 	geoURL := fs.String("geo-url", defaultGeoEndpoint, "egress lookup URL (absolute http or https, with a host)")
 	once := fs.Bool("once", false, "run a single tick, write files, print status.json, exit")
 	verbose := fs.Bool("v", false, "log transitions and errors to stderr")
