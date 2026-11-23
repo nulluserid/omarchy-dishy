@@ -61,10 +61,11 @@ data.
   - recent outages with cause and duration (dish-reported, latest three)
   - obstruction view (sky-coverage map + stats) beside the egress lookup:
     public IP + approximate exit city/region and carrier — one ifconfig.co
-    query every 5 minutes, off Starlink too; after a failed lookup nothing
-    is retried for 5 minutes; no API key. The IP check always uses IPv4, so
-    the address and exit location it shows are the IPv4 ones; on an
-    IPv6-only network there is no egress line.
+    query every 5 minutes — 60 s only while classifying (no fresh answer
+    yet, or right after a route change) — off Starlink too; after a failed
+    lookup nothing is retried for 5 minutes; no API key. The IP check
+    always uses IPv4, so the address and exit location it shows are the
+    IPv4 ones; on an IPv6-only network there is no egress line.
   - one-line usage grid: today / all-time / availability
   - active dish alert chips + software-update state
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
