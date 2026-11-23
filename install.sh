@@ -45,8 +45,15 @@ while :; do
     fi
     owner="${meta%% *}"
     mode="${meta##* }"
-    if [[ $owner != "0" && $owner != "$EUID" ]] || (( 8#$mode & 022 )); then
-        echo "Refusing to install: $dir (owner uid $owner, mode $mode) must be owned by you or root and not writable by group/others." >&2
+    if [[ $owner != "0" && $owner != "$EUID" ]]; then
+        remedy="sudo chown \"${USER:-$EUID}\" \"$dir\""
+    elif (( 8#$mode & 022 )); then
+        remedy="chmod go-w \"$dir\""
+    else
+        remedy=
+    fi
+    if [ -n "$remedy" ]; then
+        echo "Refusing to install: $dir (owner uid $owner, mode $mode) must be owned by you or root and not writable by group/others — fix with: $remedy" >&2
         exit 1
     fi
     if [ "$dir" = "${HOME%/}" ] || [ "$dir" = / ]; then

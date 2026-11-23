@@ -15,7 +15,6 @@ UMask=0077
 # More blast-radius limits: the daemon needs none of what these deny.
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
-ProtectControlGroups=yes
 ProtectClock=yes
 ProtectHostname=yes
 RestrictNamespaces=yes
