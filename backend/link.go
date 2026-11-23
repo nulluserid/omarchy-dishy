@@ -268,15 +268,20 @@ func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return geoInfo{}, err
 	}
+	// Every string here is the provider's to size, and each lands in every
+	// status.json until the next lookup: bound them once, where they enter.
+	// The carrier verdict reads the clipped values, so it can never disagree
+	// with the text that is published beside it.
+	asn, org := clip(raw.ASN, maxGeoASNRunes), clip(raw.ASNOrg, maxGeoTextRunes)
 	return geoInfo{
 		Ts:         at.Unix(),
-		IP:         raw.IP,
-		City:       raw.City,
-		Region:     raw.RegionName,
-		Country:    raw.CountryISO,
-		ASN:        raw.ASN,
-		Org:        raw.ASNOrg,
-		IsStarlink: isStarlinkCarrier(raw.ASN, raw.ASNOrg),
+		IP:         clip(raw.IP, maxGeoIPRunes),
+		City:       clip(raw.City, maxGeoTextRunes),
+		Region:     clip(raw.RegionName, maxGeoTextRunes),
+		Country:    clip(raw.CountryISO, maxGeoCountryRunes),
+		ASN:        asn,
+		Org:        org,
+		IsStarlink: isStarlinkCarrier(asn, org),
 	}, nil
 }
 

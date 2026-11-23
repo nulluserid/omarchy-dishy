@@ -40,12 +40,26 @@ partitions roll their day files through the same 30-day window (see
 day-*.json), and legacy root-level day files share it. No configuration;
 the window is the day-history retention.
 
+Amendment (2026-11-23, marketplace review of v1.6.0): the obstruction map is
+bounded at the dish trust boundary — a coherent grid of at most 256x256
+cells and 1 MiB per reply ("Security hardening") — because the shell
+re-parses hist.json every 2 s while the dashboard is open. Strings the dish
+and the egress provider send are clipped to rune caps, and the dish-reported
+outage list is bounded at ingestion (same section). Every notification draws
+from one rate bucket ("Notifications"); the control socket acts only on
+newline-terminated lines and never acknowledges a dropped command ("Panel
+control socket"). The daemon also publishes its resolved state directory as
+the symlink `$XDG_RUNTIME_DIR/starlinkd` ("State directory"), so the QML
+consumers follow a non-default `XDG_STATE_HOME`. status.json gains the
+additive `dish.dir`. No other file shape changes.
+
 The daemon writes these files, all atomic (tmp+rename), dir
-`~/.local/state/starlinkd/` (v4: daily.json and day-*.json live per dish in
-`dishes/<dish-id>/` there):
+`~/.local/state/starlinkd/` by default (see "State directory"; v4: daily.json
+and day-*.json live per dish in `dishes/<dish-id>/` there):
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
-(short probe burst) closed. (~1.5KB). Bar widget + panel read this.
+(short probe burst — at most 20 bursts in any rolling hour) closed.
+(~1.5KB). Bar widget + panel read this.
 
 ```json
 {
@@ -53,7 +67,7 @@ The daemon writes these files, all atomic (tmp+rename), dir
   "ok": true,
   "error": "",
   "dish": { "id": "ut31...", "hw": "mini1_panda_prod1", "sw": "2026.09.08.mr86422",
-            "bootCount": 363, "uptimeS": 3310, "ethMbps": 1000 },
+            "dir": "ut31...", "bootCount": 363, "uptimeS": 3310, "ethMbps": 1000 },
   "state": "ONLINE",
   "stateDetail": "",
   "live": { "latencyMs": 18.0, "downMbps": 14.2, "upMbps": 1.2, "powerW": 13.0,
@@ -77,6 +91,7 @@ The daemon writes these files, all atomic (tmp+rename), dir
 - `state` ∈ ONLINE | SEARCHING | NO_SIGNAL | THERMAL_SHUTDOWN | BOOTING | OFFLINE | NO_DATA
   (no OBSTRUCTED state — this firmware reports no live obstruction flag)
 - `stateDetail`: `SOFTWARE_UPDATE_REBOOT_PENDING` | disablementCode when ≠ OKAY | `""`
+- `dish.dir`: name of the per-dish partition actually being written (`dishes/<dir>/`), derived from the adopted `dish.id` — never from an id that is only pending in the identity debounce, and absent until an identity is known (the state root is written then). Consumers use it instead of re-deriving the name: the daemon's rule (lowercase, [a-z0-9._-], 64 bytes) and a re-implementation disagree on non-ASCII ids.
 - `ts` staleness: consumers treat data older than 30s as NO_DATA (28s of
   headroom on the 10 s idle cadence; the bar timer runs at 10 s while hidden).
 - `live.typicalDownMbps` (v3): last minute's typical ACTIVE downlink — samples
@@ -111,9 +126,14 @@ The daemon writes these files, all atomic (tmp+rename), dir
   answer describes the network as of then, so a lookup in flight during a
   route change can never pass for a post-change answer.
 
-## hist.json — 25KB, written ONLY on active (dashboard-open) ticks; the
-background cadence keeps the ring in memory and refreshes it every 60 s (also
-covering graph gaps across the idle stretch). Panel graphs read this.
+## hist.json — ~60KB with a real dish's 123x123 map (map ~41KB, ring ~21KB),
+## written ONLY on active (dashboard-open) ticks; the background cadence
+## keeps the ring in memory and refreshes it every 60 s (also covering graph
+## gaps across the idle stretch). Panel graphs read this. Conforming maximum
+## ≈ 503 KB, measured as marshaled: map 65,536 cells × ≤ 6 chars = 393 KB,
+## five 900-value ring arrays × ≤ 24 chars (value + separator) = 108 KB, and
+## its ≤ 20 outages ≈ 2 KB. Consumers treat a hist.json larger than 768 KiB
+## as invalid — headroom over that maximum.
 
 ```json
 {
@@ -126,7 +146,11 @@ covering graph gaps across the idle stretch). Panel graphs read this.
   "dropRate":   [0, 0, 1],
   "outages": [ { "cause": "BOOTING", "start": 1476462774, "durS": 112 } ],  // newest first, max 20
   "map": { "rows": 123, "cols": 123, "maxThetaDeg": 90.0,
-           "snr": [0..1 per cell, -1 = no data] }   // row-major, refreshed every 60s
+           "snr": [0..1 per cell, -1 = no data] }   // row-major, refreshed every 60s;
+                                                     // a refused or failed attempt also
+                                                     // waits 60 s; 1 ≤ rows,cols ≤ 256,
+                                                     // exactly rows·cols cells; null
+                                                     // only until the first accepted map
 }
 ```
 
@@ -236,6 +260,14 @@ answer (lookups succeed) or on an identity-verified dish answer since the
 change (`link.lastDishOK`), so a real at-home outage behind a transient
 route change still notifies. notify-send app-name: "Dishy".
 
+Rate (2026-11-23): every notification draws one token from a single bucket,
+whatever fired it — capacity 5, one token back per 10 s on the monotonic
+clock, full at daemon start. The dish decides which transitions fire (19
+alert booleans can flip per tick; a good / fail / fail flap is an outage pair
+every few ticks), so a gate per source never adds up to a bound. A
+notification the bucket cannot pay for is dropped; its event is still
+appended to events.jsonl.
+
 ## CLI controls (dial-on-demand, then exit)
 
 `starlinkd stow|unstow|reboot [-t 192.168.100.1:9200]` — exit 0 on success,
@@ -251,6 +283,39 @@ config.json > 192.168.100.1:9200 (the one-shot `stow|unstow|reboot` controls
 resolve config.json > default when `-t` is absent). Deliberately no DNS
 fallback: a VPN or foreign network must not silently redirect dish traffic.
 
+`starlinkd panel open|close|alive` — the panel channel (see "Panel control
+socket"). `panel alive` is the widget's heartbeat: it waits for the reply and
+exits 0 only on the daemon's `ok`, so any nonzero exit means nobody is
+listening. It lives under `panel` rather than as a verb of its own because
+that is fail-safe on older binaries: an unknown top-level verb is ignored
+and starts a full daemon beside the real one, while `panel` (since v1.1)
+exits 2 with its usage line on any mode it does not know.
+
+## State directory
+
+The daemon resolves its state dir as `$XDG_STATE_HOME/starlinkd`, else
+`~/.local/state/starlinkd` when `XDG_STATE_HOME` is unset. The QML consumers
+see only the shell's environment, so at every daemon start — never for
+`-once` or the CLI subcommands — the daemon publishes the directory it
+resolved as the symlink `$XDG_RUNTIME_DIR/starlinkd` → that directory's
+absolute path. The link is created under a temp name beside it and renamed
+over the previous one, so consumers never see it missing or half-made. An
+unset `XDG_RUNTIME_DIR` publishes nothing and is not an error; neither does
+a runtime dir that is not this user's alone — missing, not owned by the
+daemon's uid, or writable by group/others (publishing there would let another
+account aim the consumers at a state dir of their choosing). That skip is
+logged only in verbose mode, and the consumers fall back. A non-symlink
+occupant of that path (a real directory or file) is never removed or
+replaced: the daemon reports it and keeps running.
+
+Consumers resolve the state dir as: `$XDG_RUNTIME_DIR/starlinkd` when the
+link resolves, else `$XDG_STATE_HOME/starlinkd`, else
+`~/.local/state/starlinkd`. The link is authoritative whenever it resolves —
+it names the directory of the daemon's last start, so a user service
+configured with a different state directory (e.g. an
+`Environment=XDG_STATE_HOME=…` override on the unit) still feeds the widget
+and panel.
+
 ## Panel control socket (v2)
 
 `starlinkd panel open|close` — one line (`open\n` / `close\n`) over a Unix
@@ -263,7 +328,34 @@ it (connection swap + config persist). The daemon never blocks on it; failure to
 idle cadence. The lease covers a crashed shell: 90 s without a heartbeat and
 the daemon drops back to idle by itself — no permanent fast polling. A 30 s
 probe burst also runs once on the first failure after a good tick and on a
-default-route change — one-shot, never while the failure persists.
+default-route change — one-shot, never while the failure persists. A failure
+re-arms that burst at most 20 times in any rolling hour: past that a
+good→fail transition does not re-arm until the oldest counted one is an hour
+old, so a link that keeps flapping settles on the 10 s idle cadence, which
+still sees it recover. Route changes are not counted.
+
+A command counts only when a newline terminates it within 512 bytes,
+however many writes it arrives in; anything else — a peer that closes or
+stalls first, a line that overflows — is answered `bad` and never acted on.
+The reply is `ok` only once the command is queued for the tick loop, and
+`busy` when the queue is full and the command was dropped (`starlinkd set
+host` reports that as rejected). The listener survives transient accept
+failures (a descriptor-limit burst, an aborted client) and stops only with
+the process.
+
+`starlinkd panel alive` is the liveness heartbeat (2026-11-23): the bar
+widget sends it at load and every 5 minutes regardless of visibility. On the
+socket the command is `alive\n`, validated, queued and acknowledged (`ok`)
+exactly like `open`/`close`, and every control-socket command — `alive`,
+`open`, `close`, `set host …` — counts as a liveness signal. With
+`-idle-exit` (the service unit passes `-idle-exit 15m`) the daemon exits
+cleanly, status 0, once no such command has arrived for that long: the wait
+never sleeps past the deadline, and a daemon started at boot gets one full
+period to hear the first heartbeat. Two widget-side decisions: the service
+is started only at shell load, never on a failed heartbeat — a crash is
+covered by the unit's `Restart=on-failure`, and starting on every failed
+ping would make a deliberately stopped daemon un-stoppable — and the
+timeout is a uniform 15 minutes.
 
 ## Daemon flags
 
@@ -275,6 +367,8 @@ default-route change — one-shot, never while the failure persists.
 - `-map-interval`: obstruction map refresh (dashboard open only).
 - `-once`: single tick, write files, print status.json to stdout, exit.
 - `-v`: log transitions + errors to stderr (journald under systemd).
+- `-idle-exit`: exit cleanly (status 0) once no control-socket command
+  arrived for this long (default 0 = never; the service unit passes `15m`).
 
 ## Security hardening (2026-10-31)
 
@@ -283,17 +377,52 @@ ingested only when **all four** ring arrays are exactly ringSize (short or
 hostile responses are rejected whole); non-finite (NaN/Inf) samples are
 skipped and `round()` neutralizes non-finite floats so no state file can
 carry them (a marshal failure now keeps the last good file instead of writing
-an empty object); obstruction maps are rejected unless 1 ≤ rows,cols ≤ 2048
-and rows·cols ≤ len(snr) (ObsMap.qml additionally refuses incoherent grids);
+an empty object); obstruction maps (2026-11-23) are accepted only as a
+coherent bounded grid — 1 ≤ rows,cols ≤ 256, exactly rows·cols delivered
+cells, every raw cell finite and, once rounded, in [-1, 1] — and rejected
+whole otherwise, with the reason logged, keeping the last accepted map in
+place while still advancing the refresh clock, as a reply that fails or
+exceeds its 1 MiB per-call cap does (ObsMap.qml additionally refuses
+incoherent grids);
 dish-reported outage starts are accepted only within the freshness window
-(never future-dated) and announcements are rate-limited to one per 60 s;
+(never future-dated) and announcements are rate-limited to one per 60 s,
+with every notification drawing from one shared bucket ("Notifications");
 dish-identity switches are debounced to 2 consecutive identical answers
 (first sighting adopts immediately) and the partition set is capped at 64
-with least-recently-active eviction; the control socket reads a 512-byte
-line and rejects oversize commands; state files are mode 0600 and state
-directories 0700; history-array values outside int range clamp to a full
+with least-recently-active eviction; the control socket acts only on a
+newline-terminated line of ≤ 512 bytes, acknowledges only a command it
+queued, and keeps accepting after transient failures; state files are mode
+0600 and state directories 0700; history-array values outside int range
+clamp to a full
 ring re-read; the systemd user unit sets NoNewPrivileges/ProtectSystem/
 PrivateTmp/RestrictAddressFamilies/MemoryMax.
+
+State-dir writes and loads are hardened the same way (2026-11-23): a state
+file is written through a uniquely named temp file in its own directory, so
+nothing planted at a predictable name is opened or followed; events.jsonl is
+opened O_NOFOLLOW and a symlink there is refused, never followed; the files
+the daemon loads are read capped — config.json 4 KiB, daily.json 16 KiB,
+day-*.json 256 KiB — and a larger one is treated exactly like a corrupt one;
+the dishes/ root and a partition directory are 0700 when created, adopted or
+switched to, and no other historical file or directory mode is rewritten.
+
+Strings the peers send are clipped, never copied whole (2026-11-23): the bar
+re-parses status.json every 2 s even with the panel closed, and the dish's
+device id / hardware / software strings, the RPC error text, and every egress
+field are the peers' to size. Each is cut to a rune cap — `dish.id`, `hw`
+and `sw` 64 (real values: 26, 17, 18); the RPC error, the whole
+"code: message", 200, in `error` and in the control subcommands' stderr,
+which the panel displays; `geo.ip` 64, `geo.city`/`region`/`org` 128,
+`geo.country` 16, `geo.asn` 32 — after dropping control and format
+characters (Unicode Cc, Cf: bidi overrides, zero-width marks) and invalid
+UTF-8, never splitting a rune. Clipping truncates, it does not reject: the
+surrounding answer stands. The clipped id is the only id the daemon ever
+uses — the identity comparison, `dish.id`, config.json
+`lastDish` (written and read), events.jsonl `dish_switch`, the partition key
+and the notification text all derive from one conversion — so two ids that
+differ only past the cap are one dish. Dish-reported outages are bounded at
+ingestion to the newest 100 by start time, whatever order the dish delivered
+them; what hist.json re-sorts per active tick never exceeds that.
 
 ## Field mapping ground truth (from testdata)
 

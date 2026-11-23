@@ -4,7 +4,12 @@ After=network-online.target
 
 [Service]
 # The daemon parses unauthenticated LAN wire data, so bound the blast radius
-# of any future parsing bug. It writes only under the user's home.
+# of any future parsing bug. The directives below contain an accident in this
+# process — a rogue write, a privilege grab — and nothing more: a user unit
+# runs with the user's own credentials, so they are not a boundary against
+# other code running as that same user. It writes under the user's home
+# (state files) and in $XDG_RUNTIME_DIR (its control socket, plus one symlink
+# to the state dir that the widget reads).
 # (Directives live in [Service] — systemd ignores them in [Unit].)
 NoNewPrivileges=true
 ProtectSystem=full

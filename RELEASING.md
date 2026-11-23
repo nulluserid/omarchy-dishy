@@ -94,7 +94,9 @@ If any file other than the entry point changed — `Panel.qml`, `Model.js`,
 restart the shell (`omarchy-restart-shell`): the plugin file watcher does
 **not** invalidate the QML engine cache for non-entrypoint files, so the
 new panel only appears after a shell restart. Verify against the live
-state files in `~/.local/state/starlinkd/`.
+state files in `~/.local/state/starlinkd/` (`$XDG_STATE_HOME/starlinkd` when
+that variable is set; `$XDG_RUNTIME_DIR/starlinkd` always resolves to the
+daemon's state dir).
 
 ## 4. Marketplace update
 

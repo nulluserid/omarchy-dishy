@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -126,6 +127,23 @@ func TestDayWatermarkRestart(t *testing.T) {
 	feedAt(d2, start.Add(30*time.Second), 10.0, pf32(20), 0)
 	if d2.day.file.LastTs != start.Add(30*time.Second).Unix() {
 		t.Errorf("LastTs = %d, want %d", d2.day.file.LastTs, start.Add(30*time.Second).Unix())
+	}
+	// An oversize day file is not one this daemon wrote: a restart treats it
+	// like a corrupt one and starts fresh instead of loading it. The valid
+	// file from above comes first and the padding after it, so only the size
+	// refuses it.
+	name := filepath.Join(d.cfg.dir, dayFileName(start.Format("2006-01-02")))
+	b, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, append(b, strings.Repeat(" ", int(maxDayBytes))...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d3 := newDaemon(config{dir: d.cfg.dir}, nil)
+	d3.initDay(start.Add(31 * time.Second))
+	if d3.day.file.LastTs != 0 {
+		t.Fatalf("oversize day file loaded: LastTs = %d, want a fresh file", d3.day.file.LastTs)
 	}
 }
 
@@ -296,5 +314,14 @@ func TestTargetConfigRoundTrip(t *testing.T) {
 	}
 	if _, ok := loadTargetConfig(dir); ok {
 		t.Fatal("corrupt config reported present")
+	}
+	// So does oversize: loadable JSON followed by padding, so only the size
+	// refuses it.
+	oversize := `{"target":"192.168.100.7:9200"}` + strings.Repeat(" ", int(maxConfigBytes))
+	if err := os.WriteFile(filepath.Join(dir, configName), []byte(oversize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := loadTargetConfig(dir); ok {
+		t.Fatal("oversize config reported present")
 	}
 }

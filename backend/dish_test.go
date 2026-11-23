@@ -4,6 +4,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -11,8 +13,28 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc"
+
+	api "starlinkd/gen/spacex_api/device/device"
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
+
+// mapFailClient is a stub whose obstruction-map RPC always fails — like an
+// endpoint answering oversize (the per-call cap turns that into a failed
+// RPC) or one that times out. asks counts the attempts, so a test can see how
+// often the daemon asked.
+type mapFailClient struct {
+	*stubClient
+	asks int
+}
+
+func (c *mapFailClient) Handle(ctx context.Context, in *api.Request, opts ...grpc.CallOption) (*api.Response, error) {
+	if _, isMap := in.GetRequest().(*api.Request_DishGetObstructionMap); isMap {
+		c.asks++
+		return nil, errors.New("ResourceExhausted: received message larger than max")
+	}
+	return c.stubClient.Handle(ctx, in, opts...)
+}
 
 func TestDishDirName(t *testing.T) {
 	cases := map[string]string{
@@ -99,6 +121,9 @@ func TestDishSwitchPartitionsKeepStats(t *testing.T) {
 	if dfa2["totalS"].(float64) != 4 {
 		t.Fatalf("dish A daily mutated by the switch: %v", dfa2)
 	}
+	// A switch creates the partition with 0700, like the dishes/ root above it.
+	assertMode(t, partB, 0o700)
+	assertMode(t, filepath.Join(dir, "dishes"), 0o700)
 	// The switch is logged and remembered for the next start.
 	ev := readFile(t, filepath.Join(dir, "events.jsonl"))
 	if !strings.Contains(ev, `"type":"dish_switch","from":"ut-aaa","to":"ut-bbb"`) {
@@ -209,6 +234,42 @@ func TestDishSwitchResetsWatchState(t *testing.T) {
 	if sent != 1 {
 		t.Errorf("healthy switch sent %d notifications, want still 1", sent)
 	}
+
+	// The map that replaces the last one has to be acceptable itself: a
+	// delivered but rejected answer advances the refresh clock (the dish is
+	// asked again only every mapInterval) and leaves the last accepted map
+	// in place — last-good-wins, as for the state files.
+	c.mapRes = &dish.DishGetObstructionMapResponse{NumRows: 2, NumCols: 2, Snr: []float32{0, 0.5, 1, -1}}
+	d.goodTick(t0.Add(6*time.Second), c.status, true, false, 2*time.Second)
+	kept, asked := d.mapData, d.lastMap
+	if kept == nil || len(kept.Snr) != 4 || !asked.Equal(t0.Add(6*time.Second)) {
+		t.Fatalf("accepted map not published: %+v at %v", kept, asked)
+	}
+	// Incoherent answer, delivered before the interval elapsed: not asked.
+	c.mapRes = &dish.DishGetObstructionMapResponse{NumRows: 4, NumCols: 4, Snr: []float32{9}}
+	d.goodTick(t0.Add(8*time.Second), c.status, true, false, 2*time.Second)
+	if !d.lastMap.Equal(asked) {
+		t.Fatalf("map fetched before mapInterval: lastMap = %v, want %v", d.lastMap, asked)
+	}
+	// Due again: delivered and rejected — the clock moves, the map stays.
+	d.goodTick(asked.Add(d.cfg.mapInterval).Add(time.Second), c.status, true, false, 2*time.Second)
+	if d.mapData != kept || !d.lastMap.After(asked) {
+		t.Fatalf("rejected refresh: map %p (want the accepted %p), lastMap %v (want advanced past %v)", d.mapData, kept, d.lastMap, asked)
+	}
+	// A failed attempt waits out the interval just the same — there is no
+	// retry on the next tick. An oversize answer fails the RPC through the
+	// per-call cap, which is what was measured being re-asked on every
+	// active tick.
+	asking := &mapFailClient{stubClient: c}
+	d.client = asking
+	due := d.lastMap.Add(d.cfg.mapInterval).Add(time.Second)
+	d.goodTick(due, c.status, true, false, 2*time.Second)
+	d.goodTick(due.Add(2*time.Second), c.status, true, false, 2*time.Second)
+	if asking.asks != 1 || !d.lastMap.Equal(due) || d.mapData != kept {
+		t.Fatalf("failed map attempt: %d asks over two ticks (want 1, once per mapInterval), lastMap %v (want the attempt at %v), map %p (want %p)",
+			asking.asks, d.lastMap, due, d.mapData, kept)
+	}
+	d.client = c
 }
 
 func TestDishSwitchNoByteBackfill(t *testing.T) {
@@ -416,6 +477,9 @@ func TestAdoptLastDish(t *testing.T) {
 	if d2.dishID != "ut-bbb" || d2.statDir() != partB {
 		t.Fatalf("adopt: id=%q dir=%q", d2.dishID, d2.statDir())
 	}
+	// Adopting tightens the dishes/ root and the partition to 0700, once.
+	assertMode(t, filepath.Join(dir, "dishes"), 0o700)
+	assertMode(t, partB, 0o700)
 	d2.loadDaily()
 	if d2.daily.DownBytes != 4242 {
 		t.Fatalf("adopted daily = %+v, want the partition's counters", d2.daily)
@@ -426,5 +490,20 @@ func TestAdoptLastDish(t *testing.T) {
 	d3.adoptLastDish(t0)
 	if d3.dishID != "" || d3.statDir() != d3.cfg.dir {
 		t.Fatalf("empty adopt: id=%q dir=%q", d3.dishID, d3.statDir())
+	}
+
+	// config.json is the daemon's own file; still, the id adopted from it is
+	// clipped like a live one, so d.dishID never holds anything else.
+	want := strings.Repeat("u", maxDishStrRunes)
+	d4 := newDaemon(config{dir: t.TempDir()}, nil)
+	if err := os.MkdirAll(d4.partitionDir(want), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDaemonConfig(d4.cfg.dir, daemonConfig{LastDish: strings.Repeat("u", 40) + "\n" + strings.Repeat("u", 260)}); err != nil {
+		t.Fatal(err)
+	}
+	d4.adoptLastDish(t0)
+	if d4.dishID != want || d4.statDir() != d4.partitionDir(want) {
+		t.Fatalf("adopt of an oversize id: id=%q (len %d) dir=%q", d4.dishID, len(d4.dishID), d4.statDir())
 	}
 }

@@ -66,6 +66,28 @@ func TestFetchGeoHTTPBoundary(t *testing.T) {
 			}
 		})
 	}
+	// The provider's strings are the provider's to size, and each lands in
+	// every status.json until the next lookup: oversized, control-laden or
+	// bidi-spoofed values are clipped at the boundary, never copied whole.
+	// The leading ESC / newline / bidi overrides are dropped before the cap
+	// counts, so the kept text is the full cap of clean runes.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ip":"` + strings.Repeat("1", 300) + `","city":"\u001b\u202e` + strings.Repeat("c", 300) +
+			`","region_name":"` + strings.Repeat("r", 300) + `","country_iso":"` + strings.Repeat("U", 40) +
+			`","asn":"` + strings.Repeat("A", 64) + `","asn_org":"\n\u2066` + strings.Repeat("o", 300) + `"}`))
+	}))
+	defer srv.Close()
+	if g, err := fetchGeoURL(t0, srv.URL); err != nil || g != (geoInfo{
+		Ts:      t0.Unix(),
+		IP:      strings.Repeat("1", maxGeoIPRunes),
+		City:    strings.Repeat("c", maxGeoTextRunes),
+		Region:  strings.Repeat("r", maxGeoTextRunes),
+		Country: strings.Repeat("U", maxGeoCountryRunes),
+		ASN:     strings.Repeat("A", maxGeoASNRunes),
+		Org:     strings.Repeat("o", maxGeoTextRunes),
+	}) {
+		t.Fatalf("oversize geo = %+v, %v", g, err)
+	}
 	if redirected.Load() {
 		t.Fatal("redirect destination was contacted")
 	}
@@ -501,6 +523,37 @@ func TestPostTickProbeOneShot(t *testing.T) {
 	d.postTick(now.Add(12*time.Second), false)
 	if !now.Add(12 * time.Second).Before(d.probeUntil) {
 		t.Fatal("fresh failure after recovery did not re-probe")
+	}
+
+	// Re-arming is bounded all the same: a link flapping good/fail forever
+	// must not keep the daemon at the 2 s cadence. Two re-arms were granted
+	// above. One good->fail transition whose failing tick is `at`:
+	flap := func(at time.Time) (before time.Time, armed bool) {
+		before = d.probeUntil
+		d.postTick(at.Add(-10*time.Second), true)
+		d.postTick(at, false)
+		return before, !d.probeUntil.Equal(before)
+	}
+	for i := 2; i < probeArmMax; i++ {
+		if _, armed := flap(now.Add(time.Duration(26+50*(i-2)) * time.Second)); !armed {
+			t.Fatalf("re-arm %d refused, want the first %d in the hour granted", i+1, probeArmMax)
+		}
+	}
+	// The 21st, still inside the hour: no new burst, so the daemon stays on
+	// the idle cadence — which still sees the dish recover.
+	before, armed := flap(now.Add(926 * time.Second))
+	if armed || !d.probeUntil.Equal(before) {
+		t.Fatalf("re-arm %d inside the hour granted: probe until %v, want unchanged %v", probeArmMax+1, d.probeUntil, before)
+	}
+	if _, armed := flap(now.Add(probeArmWindow - 5*time.Second)); armed {
+		t.Fatalf("re-arm granted before the oldest counted one was %v old", probeArmWindow)
+	}
+	// Once the oldest counted re-arm is an hour old, a transition re-arms again.
+	if _, armed := flap(now.Add(probeArmWindow + 5*time.Second)); !armed {
+		t.Fatal("re-arm still refused after the oldest counted one aged out")
+	}
+	if len(d.probeArms) != probeArmMax {
+		t.Fatalf("%d re-arms counted, want %d", len(d.probeArms), probeArmMax)
 	}
 }
 

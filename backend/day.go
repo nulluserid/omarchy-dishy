@@ -81,13 +81,21 @@ func (d *daemon) initDay(now time.Time) {
 	d.pruneDays(now)
 }
 
+// maxDayBytes caps the day file the daemon will load. A full day is at most
+// 1440 buckets of a few numbers each, far below this; anything larger was
+// not written by this daemon and starts fresh, exactly like a corrupt file.
+const maxDayBytes = 256 << 10
+
 // loadDay restores the current dish's aggregates; a file dated other than
 // today is ignored for content (but still seen by pruneDays). Corrupt starts
-// fresh.
+// fresh — and so does one too large to be a file this daemon wrote.
 func (d *daemon) loadDay(now time.Time) {
 	date := now.Format("2006-01-02")
-	b, err := os.ReadFile(filepath.Join(d.statDir(), dayFileName(date)))
+	b, err := readCapped(filepath.Join(d.statDir(), dayFileName(date)), maxDayBytes)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			d.vlog("day %s: unreadable (starting fresh): %v", date, err)
+		}
 		return
 	}
 	var df dayFile

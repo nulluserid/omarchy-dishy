@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
 	dish "starlinkd/gen/spacex_api/device/dish"
 )
 
@@ -477,6 +480,57 @@ func TestOutageAnnounceCooldown(t *testing.T) {
 	if sent > 4 {
 		t.Fatalf("rotating outage starts sent %d notifications in 12s, cooldown not enforced", sent)
 	}
+	// The same endpoint can also pad the list. Ingestion keeps only the
+	// newest maxOutageEntries by start time, whatever order they arrive in,
+	// so what is retained and re-sorted per active tick stays bounded.
+	padded := func(order string) []*dish.DishOutage {
+		list := make([]*dish.DishOutage, 5000)
+		for i := range list {
+			start := i + 1
+			switch order {
+			case "descending":
+				start = 5000 - i
+			case "shuffled": // 7919 is coprime to 5000: a permutation
+				start = (i*7919)%5000 + 1
+			}
+			list[i] = &dish.DishOutage{Cause: dish.DishOutage_BOOTING, StartTimestampNs: int64(start) * 1e9, DurationNs: 1e9}
+		}
+		return list
+	}
+	for _, order := range []string{"ascending", "descending", "shuffled"} {
+		c.history = mkHist(uint64(600), []float32{20}, []float32{0})
+		c.history.Outages = padded(order)
+		d.goodTick(t0.Add(time.Minute), c.status, true, true, 2*time.Second)
+		if len(d.lastOutages) != maxOutageEntries {
+			t.Fatalf("%s: retained %d outages, want %d", order, len(d.lastOutages), maxOutageEntries)
+		}
+		if first, last := d.lastOutages[0].Start, d.lastOutages[len(d.lastOutages)-1].Start; first != 5000-maxOutageEntries+1 || last != 5000 {
+			t.Fatalf("%s: kept starts %d..%d, want %d..5000 (the newest)", order, first, last, 5000-maxOutageEntries+1)
+		}
+	}
+	// Notifications come out of one bucket whatever fires them (a fresh
+	// daemon starts with it full): a burst is capped at notifyBurst and then
+	// trickles back at one per notifyRefill. A suppressed notification still
+	// leaves its event.
+	d3 := newDaemon(config{dir: t.TempDir()}, nil)
+	sent = 0
+	for i := 0; i < 30; i++ {
+		d3.emit(event{Type: "alert_set", ID: fmt.Sprintf("a%d", i)}, "Starlink alert", "x")
+	}
+	if sent != notifyBurst {
+		t.Fatalf("a burst of 30 notifications sent %d, want %d", sent, notifyBurst)
+	}
+	if n := strings.Count(readFile(t, filepath.Join(d3.cfg.dir, "events.jsonl")), `"type":"alert_set"`); n != 30 {
+		t.Fatalf("events.jsonl holds %d of 30 alert_set events: suppression must not drop events", n)
+	}
+	// Tokens return with the clock: 25 s later two more fit, the third waits.
+	d3.notifyAt = time.Now().Add(-25 * time.Second)
+	for i := 0; i < 3; i++ {
+		d3.emit(event{Type: "alert_set", ID: "later"}, "Starlink alert", "x")
+	}
+	if sent != notifyBurst+2 {
+		t.Fatalf("after a 25 s pause %d more were sent, want 2 (one token per %s)", sent-notifyBurst, notifyRefill)
+	}
 	// A real dish's static start still announces exactly once.
 	d2 := newDaemon(config{
 		interval: 2 * time.Second, idleInterval: 10 * time.Second,
@@ -522,28 +576,92 @@ func TestRotatingIDDebounce(t *testing.T) {
 	if len(entries) > 2 {
 		t.Fatalf("rotating ids created %d partitions, want <= 2 (initial adopt only)", len(entries))
 	}
+
+	// The same endpoint can also send hostile-sized identity strings. They
+	// are clipped once at the boundary and THAT id is the dish everywhere:
+	// an answer differing only past the cap is the same dish, and no state
+	// file ever carries more than the cap.
+	want := strings.Repeat("u", maxDishStrRunes)
+	// Control and format characters (newline, ESC, a bidi override) are
+	// dropped before the cap counts.
+	c.status = statusWithID(strings.Repeat("u", 40) + "\n\x1b\u202e" + strings.Repeat("u", 260))
+	c.status.DeviceInfo.HardwareVersion = "\u202e" + strings.Repeat("h", 300)
+	c.status.DeviceInfo.SoftwareVersion = strings.Repeat("s", 300)
+	c.history = mkHist(uint64(600), []float32{20}, []float32{0})
+	d.goodTick(t0.Add(time.Minute), c.status, false, true, 2*time.Second) // a new id: first answer only pends
+	// A new id: the first answer only pends, and the pending tick publishes
+	// that id beside the partition STILL being written — the adopted dish's,
+	// never the pending one's.
+	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want || dish["dir"] != "fake-00" {
+		t.Fatalf("pending tick: dish = %v, want the pending id beside dir %q", dish, "fake-00")
+	}
+	c.status.DeviceInfo.Id += "tail-beyond-the-cap"                                     // same clipped id
+	d.goodTick(t0.Add(time.Minute+2*time.Second), c.status, false, true, 2*time.Second) // second: switches
+	if d.dishID != want {
+		t.Fatalf("dishID = %q (%d bytes), want the clipped %d-rune id", d.dishID, len(d.dishID), maxDishStrRunes)
+	}
+	if _, err := os.Stat(d.partitionDir(want)); err != nil {
+		t.Fatalf("partition for the clipped id missing: %v", err)
+	}
+	// Fail ticks republish the identity of the last good answer.
+	d.failTick(t0.Add(time.Minute+4*time.Second), "refused", 2*time.Second, false)
+	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want || dish["dir"] != want ||
+		dish["hw"] != strings.Repeat("h", maxDishStrRunes) || dish["sw"] != strings.Repeat("s", maxDishStrRunes) {
+		t.Fatalf("status.json dish = %v, want every field clipped to %d runes and dir naming the partition", dish, maxDishStrRunes)
+	}
+	if cfg := readJSON(t, dir, "config.json"); cfg["lastDish"] != want {
+		t.Fatalf("config lastDish = %q, want the clipped id", cfg["lastDish"])
+	}
+	if ev := readFile(t, filepath.Join(dir, "events.jsonl")); !strings.Contains(ev, `"type":"dish_switch","from":"fake-00","to":"`+want+`"`) {
+		t.Fatalf("events.jsonl dish_switch does not carry the clipped id: %s", ev)
+	}
+	for _, name := range []string{"status.json", "config.json", "events.jsonl"} {
+		for _, letter := range []string{"u", "h", "s"} {
+			if strings.Contains(readFile(t, filepath.Join(dir, name)), strings.Repeat(letter, maxDishStrRunes+1)) {
+				t.Fatalf("%s carries a %s-run longer than the cap", name, letter)
+			}
+		}
+	}
 }
 
 func TestControlLineTruncation(t *testing.T) {
-	// The control socket must reject oversize/interminated lines instead of
-	// acting on a truncated prefix that normalizes to a different target.
-	for _, tc := range []struct {
-		name    string
-		line    string
-		wantBad bool
-	}{
-		{"normal length", "set host 192.168.100.1:9200\n", false},
-		{"long but legal target forwards whole", "set host " + strings.Repeat("a", 245) + ":9200\n", false},
-		{"max legal target still fits", "set host " + strings.Repeat("a", 253) + "\n", false},
-		{"oversize line rejected", "set host " + strings.Repeat("a", 600) + "\n", true},
+	// The control socket must reject oversize or unterminated lines instead
+	// of acting on a truncated prefix that normalizes to a different target,
+	// must assemble a command that arrives in several writes before it acts,
+	// and must never acknowledge a command it dropped.
+	type scase struct {
+		name      string
+		writes    []string // sent in order, with a pause between them
+		busy      bool     // the daemon's command channel is already full
+		wantReply string
+		wantFwd   string // what the tick loop is left holding
+	}
+	one := func(s string) []string { return []string{s} }
+	for _, tc := range []scase{
+		{"normal length", one("set host 192.168.100.1:9200\n"), false, "ok", "set host 192.168.100.1:9200"},
+		{"long but legal target forwards whole", one("set host " + strings.Repeat("a", 245) + ":9200\n"), false, "ok", "set host " + strings.Repeat("a", 245) + ":9200"},
+		{"max legal target still fits", one("set host " + strings.Repeat("a", 253) + "\n"), false, "ok", "set host " + strings.Repeat("a", 253)},
+		{"oversize line rejected", one("set host " + strings.Repeat("a", 600) + "\n"), false, "bad", ""},
+		{"split write is assembled before acting", []string{"set host 1.", "2.3.4:9200\n"}, false, "ok", "set host 1.2.3.4:9200"},
+		{"bytes after the newline are ignored", one("close\njunk"), false, "ok", "close"},
+		{"dropped command is not acknowledged", one("close\n"), true, "busy", "occupied"},
+		{"alive heartbeat is forwarded like open and close", one("alive\n"), false, "ok", "alive"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := net.Pipe()
 			ch := make(chan string, 1)
+			if tc.busy {
+				ch <- "occupied"
+			}
 			go serveControlConn(server, ch)
 			client.SetDeadline(time.Now().Add(2 * time.Second))
-			go io.WriteString(client, tc.line)
-			// Single reader on the client end: the daemon's reply ("ok"/"bad").
+			go func() {
+				for _, w := range tc.writes {
+					io.WriteString(client, w)
+					time.Sleep(20 * time.Millisecond)
+				}
+			}()
+			// Single reader on the client end: the daemon's reply.
 			buf := make([]byte, 16)
 			var reply string
 			for {
@@ -559,45 +677,162 @@ func TestControlLineTruncation(t *testing.T) {
 			case got = <-ch:
 			default:
 			}
-			if tc.wantBad {
-				if !strings.HasPrefix(reply, "bad") || got != "" {
-					t.Fatalf("oversize line: reply=%q forwarded=%q, want bad + no forward", reply, got)
-				}
-				return
+			if !strings.HasPrefix(reply, tc.wantReply) {
+				t.Fatalf("reply = %q, want %q", reply, tc.wantReply)
 			}
-			if got != strings.TrimSuffix(tc.line, "\n") {
-				t.Fatalf("forwarded = %q, want %q", got, strings.TrimSuffix(tc.line, "\n"))
-			}
-			if !strings.HasPrefix(reply, "ok") {
-				t.Fatalf("reply = %q, want ok", reply)
+			if got != tc.wantFwd {
+				t.Fatalf("forwarded = %q, want %q", got, tc.wantFwd)
 			}
 		})
+	}
+	// A line that never gets its newline is not a command, even when the
+	// peer closes cleanly: "set host 1." must not be applied as a target.
+	// A pipe cannot half-close, so this one runs over a real Unix socket.
+	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "ctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	client, err := net.Dial("unix", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan string, 1)
+	go serveControlConn(server, ch)
+	if _, err := io.WriteString(client, "set host 1."); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply, err := io.ReadAll(client) // the daemon replies, then closes
+	if err != nil || strings.TrimSpace(string(reply)) != "bad" {
+		t.Fatalf("unterminated line: reply=%q err=%v, want bad", reply, err)
+	}
+	select {
+	case got := <-ch:
+		t.Fatalf("unterminated line was forwarded: %q", got)
+	default:
+	}
+	// Every forwarded command is a liveness signal. Under -idle-exit the
+	// deadline starts one period out, moves a full period past each command,
+	// and the main loop's wait never sleeps past it.
+	cfg := config{interval: 2 * time.Second, idleInterval: 10 * time.Second, idleExit: time.Minute}
+	d := newDaemon(cfg, nil)
+	if until := time.Until(d.idleExitAt); until > time.Minute || until < 55*time.Second {
+		t.Fatalf("idle deadline starts %v after start, want one full period", until)
+	}
+	now := time.Now()
+	d.idleExitAt = now.Add(4 * time.Second)
+	if got, want := d.nextWake(), 4*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v, want the idle deadline at %v rather than the 10 s tick", got, want)
+	}
+	if d.idleExpired(now.Add(3 * time.Second)) {
+		t.Fatal("idle expired before the deadline")
+	}
+	d.applyControl("alive", now.Add(2*time.Second))
+	if want := now.Add(2 * time.Second).Add(time.Minute); !d.idleExitAt.Equal(want) {
+		t.Fatalf("idle deadline = %v after a heartbeat, want %v", d.idleExitAt, want)
+	}
+	if got, want := d.nextWake(), 10*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v after a heartbeat, want the 10 s tick (the deadline is further out)", got)
+	}
+	d.idleExitAt = now // the deadline passed with nothing heard since
+	if !d.idleExpired(now.Add(time.Second)) {
+		t.Fatal("idle deadline passed without a command: want expired")
+	}
+	// Without the flag none of this exists: never expired, plain tick delay.
+	cfg.idleExit = 0
+	off := newDaemon(cfg, nil)
+	if off.idleExpired(now.Add(time.Hour)) {
+		t.Fatal("idle exit armed without -idle-exit")
+	}
+	if got, want := off.nextWake(), 10*time.Second; got > want || want-got > time.Second {
+		t.Fatalf("nextWake = %v without -idle-exit, want the 10 s tick", got)
 	}
 }
 
 func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
-	// The QML consumer loops rows*cols on the GUI thread: a map whose
-	// declared grid exceeds the delivered cells (or realistic dims) is
-	// rejected whole.
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 1000000, NumCols: 1000000, Snr: []float32{1},
-	}); m != nil {
-		t.Fatal("hostile 1e6 dims accepted")
+	// The dish endpoint is unauthenticated and the QML consumer loops
+	// rows*cols on the GUI thread, re-parsing hist.json every 2 s: a map
+	// that is not a coherent, bounded grid is rejected whole — never
+	// silently, the reason is what the daemon logs.
+	grid := func(n int, v float32) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = v
+		}
+		return s
 	}
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4294967295, NumCols: 4294967295, Snr: []float32{1},
-	}); m != nil {
-		t.Fatal("uint32-max dims accepted")
+	for _, tc := range []struct {
+		name       string
+		rows, cols uint32
+		snr        []float32
+		why        string // what the logged reason must say
+	}{
+		{"hostile 1e6 dims", 1000000, 1000000, []float32{1}, fmt.Sprintf("rows 1000000 > %d", maxObsMapDim)},
+		{"uint32-max dims", math.MaxUint32, math.MaxUint32, []float32{1}, fmt.Sprintf("rows %d > %d", uint64(math.MaxUint32), maxObsMapDim)},
+		{"zero rows", 0, 4, nil, "rows 0 < 1"},
+		{"zero cols", 4, 0, nil, "cols 0 < 1"},
+		{"dim above the bound", maxObsMapDim + 1, 1, grid(maxObsMapDim+1, 0), fmt.Sprintf("rows %d > %d", maxObsMapDim+1, maxObsMapDim)},
+		{"fewer cells than declared", 4, 4, []float32{1, 2, 3}, "3 cells, want rows*cols = 16"},
+		{"trailing cells", 4, 4, grid(17, 0), "17 cells, want rows*cols = 16"},
+		{"cell above the range", 4, 4, append(grid(15, 0), 1.01), "cell 1.01 outside [-1, 1]"},
+		{"cell below the range", 4, 4, append(grid(15, 0), -1.01), "cell -1.01 outside [-1, 1]"},
+		// Finiteness is judged on the raw cell: round() would turn NaN/Inf
+		// into 0 and pass a hostile cell off as a clear one.
+		{"NaN cell", 1, 2, []float32{float32(math.NaN()), 0}, "non-finite cell NaN"},
+		{"+Inf cell", 1, 2, []float32{float32(math.Inf(1)), 0}, "non-finite cell +Inf"},
+		{"-Inf cell", 1, 2, []float32{float32(math.Inf(-1)), 0}, "non-finite cell -Inf"},
+	} {
+		m, why := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: tc.rows, NumCols: tc.cols, Snr: tc.snr})
+		if m != nil {
+			t.Errorf("%s: accepted %dx%d", tc.name, m.Rows, m.Cols)
+		} else if !strings.Contains(why, tc.why) {
+			t.Errorf("%s: reason = %q, want it to say %q", tc.name, why, tc.why)
+		}
 	}
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4, NumCols: 4, Snr: []float32{1, 2, 3},
-	}); m != nil {
-		t.Fatal("rows*cols > len(snr) accepted")
+	// A missing map is refused with a reason too: no refusal is silent.
+	if m, why := toObsMap(nil); m != nil || why == "" {
+		t.Fatalf("nil map: %v, %q; want refused with a reason", m, why)
 	}
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4, NumCols: 4, Snr: make([]float32, 16),
-	}); m == nil {
-		t.Fatal("coherent map rejected")
+	// The real dish shape (CONTRACT.md: 123x123) and a grid at the bound
+	// are accepted with exactly rows*cols rounded cells, and no reason.
+	for _, tc := range []struct {
+		name       string
+		rows, cols int
+		cell       float32
+		want       float64
+	}{
+		{"real dish 123x123", 123, 123, -1, -1},
+		{"bound 256x256", maxObsMapDim, maxObsMapDim, 0.1, 0.1},
+	} {
+		m, why := toObsMap(&dish.DishGetObstructionMapResponse{
+			NumRows: uint32(tc.rows), NumCols: uint32(tc.cols), MaxThetaDeg: 90, Snr: grid(tc.rows*tc.cols, tc.cell)})
+		if m == nil {
+			t.Fatalf("%s: coherent map rejected: %s", tc.name, why)
+		}
+		if why != "" {
+			t.Fatalf("%s: accepted, yet a reason came back: %q", tc.name, why)
+		}
+		if m.Rows != tc.rows || m.Cols != tc.cols || len(m.Snr) != tc.rows*tc.cols {
+			t.Fatalf("%s: got %dx%d with %d cells", tc.name, m.Rows, m.Cols, len(m.Snr))
+		}
+		for _, v := range m.Snr {
+			if v != tc.want {
+				t.Fatalf("%s: cell = %v, want %v", tc.name, v, tc.want)
+			}
+		}
+	}
+	// 1 (a valid cell) is accepted like any other, beside the -1 sentinel.
+	if m, why := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: 1, NumCols: 2, Snr: []float32{1, -1}}); m == nil || why != "" || m.Snr[0] != 1 || m.Snr[1] != -1 {
+		t.Fatalf("edge cells: %+v (%q)", m, why)
 	}
 }
 
@@ -754,6 +989,11 @@ func TestNotADishAnswer(t *testing.T) {
 			if sf["ok"] != false || sf["state"] != "OFFLINE" {
 				t.Fatalf("tick did not fail: ok=%v state=%v", sf["ok"], sf["state"])
 			}
+			// No identity yet: the state root is written, no partition, so
+			// dish.dir is absent rather than empty or a guess.
+			if dish, _ := sf["dish"].(map[string]any); dish["dir"] != nil {
+				t.Fatalf("dish.dir = %v before any identity, want the field absent", dish["dir"])
+			}
 			if err, _ := sf["error"].(string); !strings.Contains(err, "not answering as a Starlink dish") {
 				t.Fatalf("error = %q", err)
 			}
@@ -765,5 +1005,11 @@ func TestNotADishAnswer(t *testing.T) {
 				t.Fatalf("lastDishOK = %v, want untouched %d", link["lastDishOK"], now.Unix()-10)
 			}
 		})
+	}
+	// The other way this field gets text is an RPC failure, and that text is
+	// the peer's own: the whole "code: message" is clipped on the way in.
+	code := "Unknown: "
+	if got, want := rpcErr(status.Error(codes.Unknown, strings.Repeat("e", 1000))), code+strings.Repeat("e", maxRPCErrorRunes-len(code)); got != want {
+		t.Fatalf("rpcErr = %d runes, want %d (code + message, clipped as a whole)", len(got), len(want))
 	}
 }

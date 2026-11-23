@@ -15,8 +15,12 @@ Then run `./install.sh` once from
 `~/.config/omarchy/plugins/io.github.nulluserid.dishy/` to install the `starlinkd`
 backend service. The bar widget shows live data within ~2 seconds.
 
-After a plugin update (`omarchy plugin update`), restart the shell once to
-pick up dashboard changes — the shell caches QML until restart.
+After a plugin update (`omarchy plugin update`), run `./install.sh`, then
+restart the shell. The installer restarts the daemon with the new binary and
+the shell caches QML until restart — and the daemon now exits after 15
+minutes without a heartbeat from the widget: until the shell restarts, the
+old widget sends none, so the daemon would stop and the widget show stale
+data.
 
 ## What it shows
 
@@ -47,7 +51,8 @@ pick up dashboard changes — the shell caches QML until restart.
     throughput (down fill / up line, typical-active readout) — drop strip
     and 15-min drop stats under the latency plot
   - Today chart (per-minute typical active throughput, 30-day rolling
-    history in `~/.local/state/starlinkd/dishes/<dish-id>/day-YYYYMMDD.json`)
+    history in `<state dir>/dishes/<dish-id>/day-YYYYMMDD.json`; the state
+    dir is `$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd`)
     beside power draw
   - recent outages with cause and duration (dish-reported, latest three)
   - obstruction view (sky-coverage map + stats) beside the egress lookup:
@@ -58,8 +63,8 @@ pick up dashboard changes — the shell caches QML until restart.
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
 - **Multiple dishes (1.3):** stats are per dish. Move the machine between
   Starlinks (or change the dish address) and each dish keeps its own usage,
-  availability, and day history in
-  `~/.local/state/starlinkd/dishes/<dish-id>/` — alternating between a
+  availability, and day history in `<state dir>/dishes/<dish-id>/` (the
+  state dir is resolved as under "How it works") — alternating between a
   couple of dishes in a week never blends their numbers. A dish you have
   not used before simply starts at zero. Housekeeping (1.5): a partition
   with no connection for 30 days is deleted whole at the next startup or
@@ -116,6 +121,11 @@ Upgrading from ≤ 1.1.1: run `./install.sh` once — the service unit no longer
 pins the dish target, which is what makes the setting (and `starlinkd set
 host`) effective.
 
+Upgrading from ≤ 1.6.0: run `./install.sh`, then restart the shell — the
+installer restarts the daemon, which now publishes its state directory to
+the widget, bounds the obstruction map, and exits after 15 minutes without
+a heartbeat (only the restarted shell's widget sends one).
+
 ## Remove
 
 ```bash
@@ -123,7 +133,7 @@ systemctl --user disable --now starlinkd.service
 rm ~/.config/systemd/user/starlinkd.service
 systemctl --user daemon-reload
 omarchy plugin remove io.github.nulluserid.dishy   # or delete the plugin directory
-rm -rf ~/.local/state/starlinkd                   # optional: usage/outage history
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}"/starlinkd  # optional: usage/outage history
 ```
 
 ## Marketplace
@@ -167,14 +177,18 @@ mode LANs use 192.168.5.x/10.0.0.x while all of them route the dish address)
 every 10 s and one `/proc/net/route` read per tick: no per-tick process
 spawns, no polling threads, no hist writes, no notification spam.
 
-State lives in `~/.local/state/starlinkd/`: `status.json` (scalars +
-`link`/`geo`), `hist.json` (15-min time-ordered series + obstruction map,
-written only while the dashboard is open), `day-YYYYMMDD.json` (per-minute
-typical/ping/up/drop/power aggregates, 30-day rolling), `daily.json` (today +
-all-time usage/availability), `events.jsonl` (transition log). Since v1.3 the
-usage/day-history files live per dish under `dishes/<dish-id>/` (see above).
-The full contract is documented in
-[`backend/CONTRACT.md`](backend/CONTRACT.md).
+State lives in the daemon's state dir — `$XDG_STATE_HOME/starlinkd`, or
+`~/.local/state/starlinkd/` when that variable is unset: `status.json`
+(scalars + `link`/`geo`), `hist.json` (15-min time-ordered series +
+obstruction map, written only while the dashboard is open), `day-YYYYMMDD.json`
+(per-minute typical/ping/up/drop/power aggregates, 30-day rolling),
+`daily.json` (today + all-time usage/availability), `events.jsonl`
+(transition log). Since v1.3 the usage/day-history files live per dish under
+`dishes/<dish-id>/` (see above). The daemon publishes the directory it
+resolved as the symlink `$XDG_RUNTIME_DIR/starlinkd`, and the widget and
+panel read through that link first — so a service configured with a
+different state directory still feeds the UI. The full contract is documented
+in [`backend/CONTRACT.md`](backend/CONTRACT.md).
 
 Dish controls and the poller CLI: `backend/bin/starlinkd stow|unstow|reboot`;
 the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`.

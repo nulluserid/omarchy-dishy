@@ -54,8 +54,9 @@ func TestAtomicWrite(t *testing.T) {
 	if err != nil || string(b) != `{"a":1}` {
 		t.Fatalf("readback = %q, %v", b, err)
 	}
-	if _, err := os.Stat(p + ".tmp"); !os.IsNotExist(err) {
-		t.Error("tmp file left behind")
+	// No temp file is left behind, whatever its name.
+	if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 1 || left[0] != p {
+		t.Errorf("files left behind: %v, want only %s", left, p)
 	}
 	// Overwrite.
 	if err := atomicWrite(p, []byte(`{"a":2}`)); err != nil {
@@ -64,6 +65,48 @@ func TestAtomicWrite(t *testing.T) {
 	b, _ = os.ReadFile(p)
 	if string(b) != `{"a":2}` {
 		t.Fatalf("overwrite readback = %q", b)
+	}
+	// Nothing planted at a predictable temp name is ever opened or followed.
+	// The temp file is created fresh under a unique name in the destination
+	// directory, so a planted file keeps its content and mode, a planted
+	// symlink stays a symlink with its target untouched, and the real file is
+	// still written.
+	planted, link, decoy := p+".tmp", filepath.Join(dir, "g.json.tmp"), filepath.Join(dir, "decoy")
+	if err := os.WriteFile(planted, []byte("planted"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(decoy, []byte("decoy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(p, []byte(`{"a":3}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWrite(filepath.Join(dir, "g.json"), []byte(`{"b":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != `{"a":3}` {
+		t.Errorf("readback past a planted temp file = %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "g.json")); string(b) != `{"b":1}` {
+		t.Errorf("readback past a planted temp symlink = %q", b)
+	}
+	// Each planted object is reported on its own, so one violation cannot
+	// hide another.
+	for path, want := range map[string]string{planted: "planted", decoy: "decoy"} {
+		if b, err := os.ReadFile(path); err != nil || string(b) != want {
+			t.Errorf("%s = %q, %v, want untouched %q", path, b, err, want)
+		}
+	}
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("planted temp symlink = %v, %v, want it left a symlink", fi, err)
+	}
+	for _, path := range []string{planted, decoy} {
+		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o644 {
+			t.Errorf("%s mode = %o, want 644", path, fi.Mode().Perm())
+		}
 	}
 }
 
@@ -100,6 +143,11 @@ func TestUpgradeStatePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertMode(t, p, 0o600)
+	// The pre-planted temp file was never opened: same content, same mode.
+	if b, err := os.ReadFile(p + ".tmp"); err != nil || string(b) != "old" {
+		t.Fatalf("planted temp file = %q, %v, want untouched", b, err)
+	}
+	assertMode(t, p+".tmp", 0o644)
 	p = filepath.Join(dir, "events.jsonl")
 	if err := os.WriteFile(p, []byte("{}\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -108,6 +156,29 @@ func TestUpgradeStatePermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertMode(t, p, 0o600)
+	// A symlink at the events path is refused, never followed — not even to
+	// chmod it: the decoy keeps its content and mode, and the link stays a
+	// link.
+	decoy := filepath.Join(dir, "decoy")
+	if err := os.WriteFile(decoy, []byte("decoy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendEvent(dir, event{Type: "state_change"}); err == nil {
+		t.Fatal("appendEvent appended through a symlink")
+	}
+	if b, err := os.ReadFile(decoy); err != nil || string(b) != "decoy" {
+		t.Fatalf("symlink target = %q, %v, want untouched", b, err)
+	}
+	assertMode(t, decoy, 0o644)
+	if fi, err := os.Lstat(p); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("events.jsonl = %v, %v; the planted symlink should be left in place", fi, err)
+	}
 }
 
 func TestAppendEventRotation(t *testing.T) {
@@ -194,5 +265,18 @@ func TestDailyRoundTrip(t *testing.T) {
 	d3.loadDaily()
 	if d3.daily.DownBytes != 0 {
 		t.Errorf("corrupt daily not discarded: %+v", d3.daily)
+	}
+	// Oversize is treated exactly like corrupt: a file that large was not
+	// written by this daemon. The valid JSON comes first and the padding
+	// after it, so only the size can refuse it — truncation would still
+	// leave loadable data.
+	oversize := `{"date":"2026-10-19","downBytes":777}` + strings.Repeat(" ", int(maxDailyBytes))
+	if err := os.WriteFile(filepath.Join(dir, "daily.json"), []byte(oversize), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d5 := newDaemon(config{dir: dir}, nil)
+	d5.loadDaily()
+	if d5.daily.DownBytes != 0 {
+		t.Errorf("oversize daily loaded: %+v", d5.daily)
 	}
 }
