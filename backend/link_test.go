@@ -524,6 +524,37 @@ func TestPostTickProbeOneShot(t *testing.T) {
 	if !now.Add(12 * time.Second).Before(d.probeUntil) {
 		t.Fatal("fresh failure after recovery did not re-probe")
 	}
+
+	// Re-arming is bounded all the same: a link flapping good/fail forever
+	// must not keep the daemon at the 2 s cadence. Two re-arms were granted
+	// above. One good->fail transition whose failing tick is `at`:
+	flap := func(at time.Time) (before time.Time, armed bool) {
+		before = d.probeUntil
+		d.postTick(at.Add(-10*time.Second), true)
+		d.postTick(at, false)
+		return before, !d.probeUntil.Equal(before)
+	}
+	for i := 2; i < probeArmMax; i++ {
+		if _, armed := flap(now.Add(time.Duration(26+50*(i-2)) * time.Second)); !armed {
+			t.Fatalf("re-arm %d refused, want the first %d in the hour granted", i+1, probeArmMax)
+		}
+	}
+	// The 21st, still inside the hour: no new burst, so the daemon stays on
+	// the idle cadence — which still sees the dish recover.
+	before, armed := flap(now.Add(926 * time.Second))
+	if armed || !d.probeUntil.Equal(before) {
+		t.Fatalf("re-arm %d inside the hour granted: probe until %v, want unchanged %v", probeArmMax+1, d.probeUntil, before)
+	}
+	if _, armed := flap(now.Add(probeArmWindow - 5*time.Second)); armed {
+		t.Fatalf("re-arm granted before the oldest counted one was %v old", probeArmWindow)
+	}
+	// Once the oldest counted re-arm is an hour old, a transition re-arms again.
+	if _, armed := flap(now.Add(probeArmWindow + 5*time.Second)); !armed {
+		t.Fatal("re-arm still refused after the oldest counted one aged out")
+	}
+	if len(d.probeArms) != probeArmMax {
+		t.Fatalf("%d re-arms counted, want %d", len(d.probeArms), probeArmMax)
+	}
 }
 
 func TestOnLinkChangeClosesOutageSilently(t *testing.T) {
