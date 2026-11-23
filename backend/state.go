@@ -43,6 +43,13 @@ const (
 	// Minimum seconds between dish-reported outage announcements: a hostile
 	// endpoint rotating start timestamps must not fork notify-send per tick.
 	outageReannounceS = 60
+	// Notification budget: ONE token bucket for every notification emit
+	// sends. The dish decides which transitions fire — 19 alert booleans can
+	// flip per tick, and a good / fail / fail flap is an outage pair every
+	// few ticks — so gates per source never add up to a bound. Starts full;
+	// one token back per notifyRefill on the monotonic clock.
+	notifyBurst  = 5
+	notifyRefill = 10 * time.Second
 	// Consecutive good ticks a NEW dish identity must be answered before
 	// switchDish adopts it (first-ever sighting adopts immediately). A
 	// strictly rotating hostile id then never switches.
@@ -81,6 +88,7 @@ type dishInfo struct {
 	ID        string `json:"id"`
 	HW        string `json:"hw"`
 	SW        string `json:"sw"`
+	Dir       string `json:"dir,omitempty"` // partition being written, dishes/<dir>/ (see CONTRACT.md)
 	BootCount int64  `json:"bootCount"`
 	UptimeS   int64  `json:"uptimeS"`
 	EthMbps   int64  `json:"ethMbps"`
@@ -284,6 +292,11 @@ type daemon struct {
 	lastMap  time.Time
 	lastHist time.Time // last successful history ingest (drives idle cadence)
 
+	// Notification token bucket (emit): starts full, refills on the
+	// monotonic clock. Tick-loop-owned like everything else here.
+	notifyTokens float64
+	notifyAt     time.Time
+
 	// Link state (backend/link.go). Consumers: only the tick loop.
 	link                 linkInfo // onStarlink/reason/since/lastDishOK, published in status.json
 	lastPositive         int64    // unix s of the last on-starlink evidence
@@ -337,6 +350,7 @@ func newDaemon(cfg config, client api.DeviceClient) *daemon {
 	}
 	d.day.minute = -1 // no open bucket until the first sample
 	d.resetArrays()
+	d.notifyTokens, d.notifyAt = notifyBurst, time.Now() // notification bucket starts full
 	return d
 }
 

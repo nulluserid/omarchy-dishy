@@ -645,18 +645,41 @@ func (d *daemon) handleTransitions(now time.Time, s *dish.DishGetStatusResponse,
 	}
 }
 
-// emit appends an event and, when summary is non-empty, sends a notification.
-// Neither is ever fatal.
+// emit appends an event and, when summary is non-empty, sends a
+// notification — unless the notification bucket is spent, in which case the
+// event is still recorded and only the notification is dropped. Neither is
+// ever fatal. notifySend stays synchronous; the bucket is what bounds how
+// long that can stall the tick loop — at most notifyBurst sends, each under
+// its own timeout, per refill window.
 func (d *daemon) emit(ev event, summary, body string) {
 	ev.Ts = time.Now().Unix()
 	if err := appendEvent(d.cfg.dir, ev); err != nil {
 		d.vlog("events: %v", err)
 	}
-	if summary != "" {
-		if err := notifySend(summary, body); err != nil {
-			d.vlog("notify: %v", err)
-		}
+	if summary == "" {
+		return
 	}
+	if !d.notifyAllowed() {
+		d.vlog("notify: rate-limited (%s)", summary)
+		return
+	}
+	if err := notifySend(summary, body); err != nil {
+		d.vlog("notify: %v", err)
+	}
+}
+
+// notifyAllowed takes one token from the notification bucket. Refill is
+// measured on the monotonic reading time.Now() carries, so a wall-clock jump
+// can neither drain it nor refill it.
+func (d *daemon) notifyAllowed() bool {
+	now := time.Now()
+	d.notifyTokens = min(notifyBurst, d.notifyTokens+now.Sub(d.notifyAt).Seconds()/notifyRefill.Seconds())
+	d.notifyAt = now
+	if d.notifyTokens < 1 {
+		return false
+	}
+	d.notifyTokens--
+	return true
 }
 
 // ---- file builders ----
@@ -694,6 +717,7 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 			ID:        ident.ID,
 			HW:        ident.HW,
 			SW:        ident.SW,
+			Dir:       d.publishedDir(),
 			BootCount: int64(di.GetBootcount()),
 			UptimeS:   int64(s.GetDeviceState().GetUptimeS()),
 			EthMbps:   int64(s.GetEthSpeedMbps()),
@@ -769,6 +793,7 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 			BootCount: int64(s.GetDeviceInfo().GetBootcount()), EthMbps: int64(s.GetEthSpeedMbps()),
 		}
 	}
+	sf.Dish.Dir = d.publishedDir() // set even before any answer: an adopted partition is being written
 	sf.Usage = usageStats{
 		DownGB:        round(float64(d.daily.DownBytes)/1e9, 2),
 		UpGB:          round(float64(d.daily.UpBytes)/1e9, 2),

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,7 +62,9 @@ func runControl(cmd string, args []string) int {
 	}
 
 	if _, err := api.NewDeviceClient(conn).Handle(ctx, &req); err != nil {
-		fmt.Fprintf(os.Stderr, "starlinkd: %s failed: %v\n", cmd, err)
+		// The panel shows this line verbatim as the control's result, so the
+		// dish's status text gets the same boundary here as in status.json.
+		fmt.Fprintf(os.Stderr, "starlinkd: %s failed: %s\n", cmd, rpcErr(err))
 		return 1
 	}
 	return 0
@@ -203,6 +206,10 @@ func (d *daemon) setTarget(target string) error {
 
 const ctrlSocketName = "starlinkd.sock"
 
+// controlAcceptRetry is the accept loop's pause after a transient Accept
+// failure, before it tries again.
+const controlAcceptRetry = 100 * time.Millisecond
+
 func controlSocketPath() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, ctrlSocketName)
@@ -242,10 +249,26 @@ func (d *daemon) startControl() error {
 	d.ctrlLn, d.ctrlPath = ln, path
 
 	go func() {
+		// Accept failures are logged once per distinct message for the life
+		// of the process: a daemon that is fd-starved flaps between one
+		// successful accept and the next failure, and logging per episode
+		// would flood the journal instead.
+		last := ""
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				return // listener closed at process exit
+				if errors.Is(err, net.ErrClosed) {
+					return // listener closed at process exit
+				}
+				// Any other failure is treated as transient: a burst that hits
+				// the descriptor limit (EMFILE/ENFILE) or an aborted client
+				// must not disable panel control for the life of the process.
+				if msg := err.Error(); msg != last {
+					d.vlog("control accept: %v (retrying)", err)
+					last = msg
+				}
+				time.Sleep(controlAcceptRetry)
+				continue
 			}
 			go serveControlConn(c, d.ctrlCh)
 		}
@@ -258,19 +281,26 @@ func serveControlConn(c net.Conn, ch chan<- string) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(2 * time.Second))
 	// 512 covers every legal command ('set host ' + a 253-byte-cap target
-	// plus appended :9200). A full buffer means the line is oversize or
-	// unterminated: reject it rather than act on a truncated prefix that
-	// could normalize to a different valid target.
+	// plus appended :9200). A command is only what a newline terminates
+	// inside that buffer, however many writes it arrives in: a stream read
+	// can split it, and a peer that closes without the newline — or fills
+	// the buffer without one — is rejected rather than have its prefix acted
+	// on ("set host 1." normalizes to a different, valid target).
 	b := make([]byte, 512)
-	n, err := c.Read(b)
-	if n == len(b) {
+	var n int
+	for n < len(b) {
+		k, err := c.Read(b[n:])
+		n += k
+		if err != nil || bytes.IndexByte(b[:n], '\n') >= 0 {
+			break
+		}
+	}
+	end := bytes.IndexByte(b[:n], '\n')
+	if end < 0 {
 		_, _ = io.WriteString(c, "bad\n")
 		return
 	}
-	if err != nil && !errors.Is(err, io.EOF) {
-		return
-	}
-	cmd := strings.TrimSpace(string(b[:n]))
+	cmd := strings.TrimSpace(string(b[:end]))
 	forward := ""
 	switch {
 	case cmd == "open" || cmd == "close":
@@ -283,11 +313,16 @@ func serveControlConn(c net.Conn, ch chan<- string) {
 		forward = cmd
 	}
 	if forward != "" {
+		// "ok" promises the tick loop will see the command, so it may only
+		// follow an enqueue that actually happened. A full channel means the
+		// command is dropped, and the caller has to hear that instead.
+		reply := "busy\n"
 		select {
 		case ch <- forward:
+			reply = "ok\n"
 		default:
 		}
-		_, _ = io.WriteString(c, "ok\n")
+		_, _ = io.WriteString(c, reply)
 		return
 	}
 	_, _ = io.WriteString(c, "bad\n")

@@ -508,6 +508,29 @@ func TestOutageAnnounceCooldown(t *testing.T) {
 			t.Fatalf("%s: kept starts %d..%d, want %d..5000 (the newest)", order, first, last, 5000-maxOutageEntries+1)
 		}
 	}
+	// Notifications come out of one bucket whatever fires them (a fresh
+	// daemon starts with it full): a burst is capped at notifyBurst and then
+	// trickles back at one per notifyRefill. A suppressed notification still
+	// leaves its event.
+	d3 := newDaemon(config{dir: t.TempDir()}, nil)
+	sent = 0
+	for i := 0; i < 30; i++ {
+		d3.emit(event{Type: "alert_set", ID: fmt.Sprintf("a%d", i)}, "Starlink alert", "x")
+	}
+	if sent != notifyBurst {
+		t.Fatalf("a burst of 30 notifications sent %d, want %d", sent, notifyBurst)
+	}
+	if n := strings.Count(readFile(t, filepath.Join(d3.cfg.dir, "events.jsonl")), `"type":"alert_set"`); n != 30 {
+		t.Fatalf("events.jsonl holds %d of 30 alert_set events: suppression must not drop events", n)
+	}
+	// Tokens return with the clock: 25 s later two more fit, the third waits.
+	d3.notifyAt = time.Now().Add(-25 * time.Second)
+	for i := 0; i < 3; i++ {
+		d3.emit(event{Type: "alert_set", ID: "later"}, "Starlink alert", "x")
+	}
+	if sent != notifyBurst+2 {
+		t.Fatalf("after a 25 s pause %d more were sent, want 2 (one token per %s)", sent-notifyBurst, notifyRefill)
+	}
 	// A real dish's static start still announces exactly once.
 	d2 := newDaemon(config{
 		interval: 2 * time.Second, idleInterval: 10 * time.Second,
@@ -559,11 +582,19 @@ func TestRotatingIDDebounce(t *testing.T) {
 	// an answer differing only past the cap is the same dish, and no state
 	// file ever carries more than the cap.
 	want := strings.Repeat("u", maxDishStrRunes)
-	c.status = statusWithID(strings.Repeat("u", 40) + "\n\x1b" + strings.Repeat("u", 260))
-	c.status.DeviceInfo.HardwareVersion = strings.Repeat("h", 300)
+	// Control and format characters (newline, ESC, a bidi override) are
+	// dropped before the cap counts.
+	c.status = statusWithID(strings.Repeat("u", 40) + "\n\x1b\u202e" + strings.Repeat("u", 260))
+	c.status.DeviceInfo.HardwareVersion = "\u202e" + strings.Repeat("h", 300)
 	c.status.DeviceInfo.SoftwareVersion = strings.Repeat("s", 300)
 	c.history = mkHist(uint64(600), []float32{20}, []float32{0})
-	d.goodTick(t0.Add(time.Minute), c.status, false, true, 2*time.Second)               // a new id: first answer only pends
+	d.goodTick(t0.Add(time.Minute), c.status, false, true, 2*time.Second) // a new id: first answer only pends
+	// A new id: the first answer only pends, and the pending tick publishes
+	// that id beside the partition STILL being written — the adopted dish's,
+	// never the pending one's.
+	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want || dish["dir"] != "fake-00" {
+		t.Fatalf("pending tick: dish = %v, want the pending id beside dir %q", dish, "fake-00")
+	}
 	c.status.DeviceInfo.Id += "tail-beyond-the-cap"                                     // same clipped id
 	d.goodTick(t0.Add(time.Minute+2*time.Second), c.status, false, true, 2*time.Second) // second: switches
 	if d.dishID != want {
@@ -574,9 +605,9 @@ func TestRotatingIDDebounce(t *testing.T) {
 	}
 	// Fail ticks republish the identity of the last good answer.
 	d.failTick(t0.Add(time.Minute+4*time.Second), "refused", 2*time.Second, false)
-	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want ||
+	if dish, _ := readJSON(t, dir, "status.json")["dish"].(map[string]any); dish["id"] != want || dish["dir"] != want ||
 		dish["hw"] != strings.Repeat("h", maxDishStrRunes) || dish["sw"] != strings.Repeat("s", maxDishStrRunes) {
-		t.Fatalf("status.json dish = %v, want every field clipped to %d runes", dish, maxDishStrRunes)
+		t.Fatalf("status.json dish = %v, want every field clipped to %d runes and dir naming the partition", dish, maxDishStrRunes)
 	}
 	if cfg := readJSON(t, dir, "config.json"); cfg["lastDish"] != want {
 		t.Fatalf("config lastDish = %q, want the clipped id", cfg["lastDish"])
@@ -594,25 +625,42 @@ func TestRotatingIDDebounce(t *testing.T) {
 }
 
 func TestControlLineTruncation(t *testing.T) {
-	// The control socket must reject oversize/interminated lines instead of
-	// acting on a truncated prefix that normalizes to a different target.
-	for _, tc := range []struct {
-		name    string
-		line    string
-		wantBad bool
-	}{
-		{"normal length", "set host 192.168.100.1:9200\n", false},
-		{"long but legal target forwards whole", "set host " + strings.Repeat("a", 245) + ":9200\n", false},
-		{"max legal target still fits", "set host " + strings.Repeat("a", 253) + "\n", false},
-		{"oversize line rejected", "set host " + strings.Repeat("a", 600) + "\n", true},
+	// The control socket must reject oversize or unterminated lines instead
+	// of acting on a truncated prefix that normalizes to a different target,
+	// must assemble a command that arrives in several writes before it acts,
+	// and must never acknowledge a command it dropped.
+	type scase struct {
+		name      string
+		writes    []string // sent in order, with a pause between them
+		busy      bool     // the daemon's command channel is already full
+		wantReply string
+		wantFwd   string // what the tick loop is left holding
+	}
+	one := func(s string) []string { return []string{s} }
+	for _, tc := range []scase{
+		{"normal length", one("set host 192.168.100.1:9200\n"), false, "ok", "set host 192.168.100.1:9200"},
+		{"long but legal target forwards whole", one("set host " + strings.Repeat("a", 245) + ":9200\n"), false, "ok", "set host " + strings.Repeat("a", 245) + ":9200"},
+		{"max legal target still fits", one("set host " + strings.Repeat("a", 253) + "\n"), false, "ok", "set host " + strings.Repeat("a", 253)},
+		{"oversize line rejected", one("set host " + strings.Repeat("a", 600) + "\n"), false, "bad", ""},
+		{"split write is assembled before acting", []string{"set host 1.", "2.3.4:9200\n"}, false, "ok", "set host 1.2.3.4:9200"},
+		{"bytes after the newline are ignored", one("close\njunk"), false, "ok", "close"},
+		{"dropped command is not acknowledged", one("close\n"), true, "busy", "occupied"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client, server := net.Pipe()
 			ch := make(chan string, 1)
+			if tc.busy {
+				ch <- "occupied"
+			}
 			go serveControlConn(server, ch)
 			client.SetDeadline(time.Now().Add(2 * time.Second))
-			go io.WriteString(client, tc.line)
-			// Single reader on the client end: the daemon's reply ("ok"/"bad").
+			go func() {
+				for _, w := range tc.writes {
+					io.WriteString(client, w)
+					time.Sleep(20 * time.Millisecond)
+				}
+			}()
+			// Single reader on the client end: the daemon's reply.
 			buf := make([]byte, 16)
 			var reply string
 			for {
@@ -628,19 +676,48 @@ func TestControlLineTruncation(t *testing.T) {
 			case got = <-ch:
 			default:
 			}
-			if tc.wantBad {
-				if !strings.HasPrefix(reply, "bad") || got != "" {
-					t.Fatalf("oversize line: reply=%q forwarded=%q, want bad + no forward", reply, got)
-				}
-				return
+			if !strings.HasPrefix(reply, tc.wantReply) {
+				t.Fatalf("reply = %q, want %q", reply, tc.wantReply)
 			}
-			if got != strings.TrimSuffix(tc.line, "\n") {
-				t.Fatalf("forwarded = %q, want %q", got, strings.TrimSuffix(tc.line, "\n"))
-			}
-			if !strings.HasPrefix(reply, "ok") {
-				t.Fatalf("reply = %q, want ok", reply)
+			if got != tc.wantFwd {
+				t.Fatalf("forwarded = %q, want %q", got, tc.wantFwd)
 			}
 		})
+	}
+	// A line that never gets its newline is not a command, even when the
+	// peer closes cleanly: "set host 1." must not be applied as a target.
+	// A pipe cannot half-close, so this one runs over a real Unix socket.
+	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "ctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	client, err := net.Dial("unix", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	server, err := ln.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch := make(chan string, 1)
+	go serveControlConn(server, ch)
+	if _, err := io.WriteString(client, "set host 1."); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.(*net.UnixConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	reply, err := io.ReadAll(client) // the daemon replies, then closes
+	if err != nil || strings.TrimSpace(string(reply)) != "bad" {
+		t.Fatalf("unterminated line: reply=%q err=%v, want bad", reply, err)
+	}
+	select {
+	case got := <-ch:
+		t.Fatalf("unterminated line was forwarded: %q", got)
+	default:
 	}
 }
 
@@ -865,6 +942,11 @@ func TestNotADishAnswer(t *testing.T) {
 			sf := readJSON(t, d.cfg.dir, "status.json")
 			if sf["ok"] != false || sf["state"] != "OFFLINE" {
 				t.Fatalf("tick did not fail: ok=%v state=%v", sf["ok"], sf["state"])
+			}
+			// No identity yet: the state root is written, no partition, so
+			// dish.dir is absent rather than empty or a guess.
+			if dish, _ := sf["dish"].(map[string]any); dish["dir"] != nil {
+				t.Fatalf("dish.dir = %v before any identity, want the field absent", dish["dir"])
 			}
 			if err, _ := sf["error"].(string); !strings.Contains(err, "not answering as a Starlink dish") {
 				t.Fatalf("error = %q", err)

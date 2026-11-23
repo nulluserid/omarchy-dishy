@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -32,6 +34,31 @@ func stateDir() (string, error) {
 // consumers that cannot ask the daemon (CONTRACT.md "State directory").
 const stateLinkName = "starlinkd"
 
+// errRuntimeDirUntrusted marks a publish that was skipped on purpose: the
+// runtime dir is missing, not this user's, or writable by others. Nothing
+// failed — the consumers fall back to the env resolution — so the caller
+// logs it quietly instead of reporting a fault.
+var errRuntimeDirUntrusted = errors.New("runtime dir missing, not owned by this user, or writable by group/others")
+
+// checkRuntimeDir reports errRuntimeDirUntrusted unless dir is a directory
+// owned by this user that group and others cannot write — the XDG runtime
+// dir's own preconditions. A dir other accounts can write would let one of
+// them plant the link (or a non-symlink occupant) and aim the widget at a
+// state dir of their choosing.
+func checkRuntimeDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return fmt.Errorf("%w: %s: %v", errRuntimeDirUntrusted, dir, err)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("%w: %s is not owned by uid %d", errRuntimeDirUntrusted, dir, os.Getuid())
+	}
+	if mode := fi.Mode().Perm(); mode&0o022 != 0 {
+		return fmt.Errorf("%w: %s has mode %o", errRuntimeDirUntrusted, dir, mode)
+	}
+	return nil
+}
+
 // publishStateDir points $XDG_RUNTIME_DIR/starlinkd at the daemon's state
 // dir. The daemon honors XDG_STATE_HOME; the QML consumers see only the
 // shell's environment, so a user service configured with a different state
@@ -40,14 +67,18 @@ const stateLinkName = "starlinkd"
 // consumers never see it missing or half-made.
 //
 // An unset XDG_RUNTIME_DIR is a no-op — nowhere to publish, and the consumers
-// fall back to the same env resolution the daemon uses. The one thing never
-// done here is removing or replacing a non-symlink occupant of the path (a
-// real directory or file): it is the user's, so it is reported and left
-// alone. Errors are the caller's to log, never fatal.
+// fall back to the same env resolution the daemon uses. So is a runtime dir
+// that is not this user's alone (checkRuntimeDir). The one thing never done
+// here is removing or replacing a non-symlink occupant of the path (a real
+// directory or file): it is the user's, so it is reported and left alone.
+// Errors are the caller's to log, never fatal.
 func publishStateDir(dir string) error {
 	runtime := os.Getenv("XDG_RUNTIME_DIR")
 	if runtime == "" {
 		return nil
+	}
+	if err := checkRuntimeDir(runtime); err != nil {
+		return err
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {

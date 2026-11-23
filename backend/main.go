@@ -12,6 +12,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -69,6 +70,20 @@ func run(args []string) int {
 		fmt.Fprintf(osStderr, "starlinkd: state dir: %v\n", err)
 		return 1
 	}
+	// Daemon mode only: -once returns further down without publishing, and
+	// the CLI subcommands never reach run(). A runtime dir that is not this
+	// user's alone is a quiet skip (the consumers fall back to the env
+	// resolution); a real failure is reported. Never fatal.
+	if !*once {
+		if err := publishStateDir(dir); err != nil {
+			switch skip := errors.Is(err, errRuntimeDirUntrusted); {
+			case skip && *verbose:
+				fmt.Fprintf(osStderr, "starlinkd: state dir: %v (not published; the widget falls back)\n", err)
+			case !skip:
+				fmt.Fprintf(osStderr, "starlinkd: %v (state dir not published to the widget)\n", err)
+			}
+		}
+	}
 
 	// Target precedence: explicit -t > config.json (`set host`) > default.
 	tSet := false
@@ -125,12 +140,6 @@ func run(args []string) int {
 		}
 		fmt.Println(string(b))
 		return 0
-	}
-
-	// Daemon mode only (the -once block above and the CLI subcommands never
-	// get here): publish the state dir the QML consumers should read.
-	if err := publishStateDir(dir); err != nil {
-		fmt.Fprintf(osStderr, "starlinkd: %v (state dir not published to the widget)\n", err)
 	}
 
 	if err := d.startControl(); err != nil {

@@ -55,6 +55,17 @@ func (d *daemon) partitionDir(id string) string {
 	return filepath.Join(d.cfg.dir, dishesDirName, dishDirName(id))
 }
 
+// publishedDir is the name of the partition actually being written, as
+// status.json publishes it (dish.dir): the adopted dish's, never an id that
+// is merely pending in the identity debounce. Empty while no identity is
+// known (the state root is written then), which omits the field.
+func (d *daemon) publishedDir() string {
+	if d.dishID == "" {
+		return ""
+	}
+	return dishDirName(d.dishID)
+}
+
 // statDir is where THIS dish's accumulated state files go: the dish's
 // partition once an identity is known, the state root before that (startup
 // fail ticks with no evidence yet).
