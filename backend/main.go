@@ -127,6 +127,9 @@ func run(args []string) int {
 		return 0
 	}
 
+	// The notification helper is resolved and verified here, once, before
+	// the tick loop — never from ambient PATH at notification time.
+	d.resolveNotifySend()
 	if err := d.startControl(); err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: %v (panel wake-ups disabled)\n", err)
 	}
