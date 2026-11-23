@@ -68,7 +68,7 @@ type config struct {
 	idleInterval          time.Duration // poll cadence while the dashboard is closed
 	idleHistInterval      time.Duration // background history refresh while closed
 	mapInterval           time.Duration
-	geoInterval           time.Duration // egress lookup while on-network
+	geoInterval           time.Duration // egress lookup on the settled clock (on-network, or answered off-network)
 	geoTransitionInterval time.Duration // egress lookup while classifying / dashboard just opened
 	once                  bool
 	verbose               bool
@@ -291,6 +291,7 @@ type daemon struct {
 	geo                  geoInfo  // last egress lookup; Ts=0 until the first call
 	geoFetching          bool     // an egress lookup is in flight
 	geoBump              bool     // dashboard (re)opened: refresh geo if older than transition interval
+	lastGeoFailUnix      int64    // unix s of the last failed lookup; failure-backoff anchor (0 = none)
 	geoCh                chan geoInfo
 	lastRoute            string // default-route fingerprint, "" = no default route
 	lastRouteKnown       bool

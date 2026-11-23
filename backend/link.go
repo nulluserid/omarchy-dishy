@@ -15,10 +15,13 @@
 //	               (outage, captive portal, dish reboot), then hide
 //
 // The egress lookup is ifconfig.co/json (no key, documented ~1 request/min
-// courtesy limit): every geoInterval on the network, every
-// geoTransitionInterval while classifying or after a dashboard open, and
-// immediately after a default-route change. Lookups run off the tick path so
-// a slow provider never delays a status write.
+// courtesy limit): every geoInterval once the network is settled — on it, or
+// a fresh answer naming another carrier — every geoTransitionInterval only
+// while classifying (no fresh answer yet, or right after a default-route
+// change), on a dashboard open when the answer is over the transition
+// interval old, and a full geoInterval after any failure — except that a
+// default-route change still looks up at once (maybeFetchGeo). Lookups run
+// off the tick path so a slow provider never delays a status write.
 package main
 
 import (
@@ -160,20 +163,44 @@ func geoEvidence(g geoInfo, now time.Time) bool {
 	return g.Ts > 0 && now.Unix()-g.Ts <= int64(linkGraceWindow.Seconds())
 }
 
-// maybeFetchGeo starts an egress lookup when the stored one is due: on the
-// normal clock while on-network, on the transition clock while classifying,
-// and (on the dashboard-open open command) whenever it is older than the
-// transition interval.
+// maybeFetchGeo starts an egress lookup when the stored one is due.
+//
+// Cadence rule. The transition clock (geoTransitionInterval) applies only
+// while classifying: there is no fresh geo evidence yet (geoEvidence false —
+// startup, or the last answer aged past the grace window) or the default
+// route just changed (the stored answer describes the route we left). Every
+// other state runs on the settled clock (geoInterval) — INCLUDING a settled
+// off-network machine: a fresh answer naming another carrier is a finished
+// classification, not a pending one, so it is re-checked like any on-network
+// answer. The dashboard-open command still refreshes an answer that is older
+// than the transition interval. (The marker's onStarlink is no input here:
+// keying the fast clock on it kept asking every 60 s for as long as the
+// machine was away, contradicting CONTRACT.md "status.json — geo".)
+//
+// Failure backoff. After a failed lookup the clocks hold for a full
+// geoInterval — settled, transition, and the dashboard-open bump alike. A
+// failing lookup used to be re-launched on the very next tick: the stored
+// answer was already older than the transition clock (or there was none),
+// so an offline machine or a captive portal was asked once per tick,
+// forever. One thing still looks up at once: a default-route change. The
+// network changed under us, so the failure says nothing about the route we
+// are on now — and it is how the boot race (daemon up before the network)
+// recovers on the next tick instead of after the backoff. A later success
+// clears the backoff.
 func (d *daemon) maybeFetchGeo(now time.Time, active bool) {
 	if d.geoFetching {
 		return
 	}
+	// Failure backoff, except across a default-route change.
+	if d.lastGeoFailUnix != 0 && !d.routeChanged &&
+		now.Sub(time.Unix(d.lastGeoFailUnix, 0)) < d.cfg.geoInterval {
+		return
+	}
 	age := now.Sub(time.Unix(d.geo.Ts, 0))
-	// Fresh egress lookup whenever the answer could change: normal clock on a
-	// settled network, transition clock while classifying or right after a
-	// default-route flip.
-	if pending := !d.link.OnStarlink || d.routeChanged; age >= d.cfg.geoInterval ||
-		(pending && age >= d.cfg.geoTransitionInterval) {
+	// Fresh egress lookup whenever the answer could change: settled clock, or
+	// the transition clock while classifying.
+	classifying := !geoEvidence(d.geo, now) || d.routeChanged
+	if age >= d.cfg.geoInterval || (classifying && age >= d.cfg.geoTransitionInterval) {
 		d.routeChanged = false
 		d.startGeoFetch()
 		return
@@ -216,9 +243,13 @@ func (d *daemon) drainGeo() {
 func (d *daemon) applyGeo(g geoInfo) {
 	d.geoFetching = false
 	if g.Ts == 0 {
-		return // failed lookup: keep the last known result
+		// Failed lookup: keep the last known result and anchor the failure
+		// backoff (maybeFetchGeo).
+		d.lastGeoFailUnix = time.Now().Unix()
+		return
 	}
 	d.geo = g
+	d.lastGeoFailUnix = 0 // a success clears the failure backoff
 	d.updateLink(time.Now(), d.lastDishOK)
 }
 
