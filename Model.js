@@ -26,6 +26,11 @@ var MAX_CONFIG_CHARS = 4096    // config.json, a target and a dish id
 // Consumers refuse to draw anything beyond it.
 var MAX_MAP_DIM = 256
 
+// Alerts from status.json the shell will ever look at. The daemon emits at
+// most 19 (one per dish alert flag); the cap keeps every loop over them —
+// tooltip, bar level, the panel's chips — from scaling with file content.
+var MAX_ALERTS = 64
+
 function parse(text) {
   try {
     var d = JSON.parse(String(text))
@@ -66,12 +71,20 @@ function isOffNetwork(status) {
   return !!link && link.onStarlink === false
 }
 
+// status.alerts, capped at its first MAX_ALERTS entries. Not an array reads
+// as none.
+function alertList(status) {
+  var alerts = status ? status.alerts : null
+  if (!Array.isArray(alerts)) return []
+  return alerts.length > MAX_ALERTS ? alerts.slice(0, MAX_ALERTS) : alerts
+}
+
 // Every alert the dish currently reports, as labels — the full set, shown in
 // the tooltip so nothing the dish knows stays hidden from the user.
 function allAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     out.push(a.label ? String(a.label) : titleCase(id))
@@ -84,8 +97,8 @@ function allAlertLabels(status) {
 // not turn the bar amber.
 function actionAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     if (id === "is_heating" || id === "is_power_save_idle") continue
@@ -185,6 +198,32 @@ function decimate(values, buckets) {
     out.push(count ? sum / count : null)
   }
   return out
+}
+
+// hist.json after parseBounded, or null when its shape is off: n an integer
+// in 1..900 (the daemon's ring is fixed at 900; CONTRACT.md: all five series
+// have exactly n entries), each of the five series an array of exactly n
+// entries that are null or finite numbers, intervalS a finite number > 0 and
+// ts a finite number. The panel walks these arrays on every 2 s reload, so
+// they must scale with the ring, never with the file: a tampered hist.json
+// degrades exactly like an unreadable one.
+function validHist(h) {
+  if (!h || typeof h !== "object") return null
+  var n = h.n
+  if (typeof n !== "number" || !isFinite(n) || Math.floor(n) !== n) return null
+  if (n < 1 || n > 900) return null
+  if (typeof h.intervalS !== "number" || !isFinite(h.intervalS) || h.intervalS <= 0) return null
+  if (typeof h.ts !== "number" || !isFinite(h.ts)) return null
+  var names = ["latencyMs", "downMbps", "upMbps", "powerW", "dropRate"]
+  for (var i = 0; i < names.length; i++) {
+    var series = h[names[i]]
+    if (!Array.isArray(series) || series.length !== n) return null
+    for (var j = 0; j < series.length; j++) {
+      var v = series[j]
+      if (v !== null && (typeof v !== "number" || !isFinite(v))) return null
+    }
+  }
+  return h
 }
 
 // hist.json `map` as ObsMap draws it — {rows, cols, maxThetaDeg, snr} with

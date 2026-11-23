@@ -40,7 +40,8 @@ Panel {
     : level === "bad" ? Color.urgent : Color.muted
   readonly property bool hasData: s !== null && !sStale
 
-  // hist.json: parsed only while open; null = unreadable/missing/oversize.
+  // hist.json: parsed only while open; null = unreadable, oversize or
+  // malformed.
   // map is its obstruction map after Model.validMap (null when absent or
   // rejected). It is replaced only when the content differs, so the Canvas
   // repaints on a real change — the daemon refreshes the map every 60 s —
@@ -50,10 +51,12 @@ Panel {
   function reloadHist() {
     try {
       histFile.reload()
-      // Bounded: the dish endpoint behind the map is unauthenticated, so a
-      // file past the daemon's contract size is dropped as unreadable
-      // before the parse, not parsed on the GUI thread.
-      root.h = Model.parseBounded(histFile.text(), Model.MAX_HIST_CHARS)
+      // Bounded and shape-checked: the dish endpoint behind this file is
+      // unauthenticated, so one past the daemon's contract size is dropped
+      // before the parse and one whose series are not the ring's is dropped
+      // after it — both as unreadable, so the loops over h scale with the
+      // ring, never with the file.
+      root.h = Model.validHist(Model.parseBounded(histFile.text(), Model.MAX_HIST_CHARS))
     } catch (e) {
       root.h = null
     }
@@ -328,7 +331,8 @@ Panel {
             spacing: Style.space(5)
 
             Repeater {
-              model: root.hasData && s.alerts ? s.alerts : []
+              // Capped (Model.MAX_ALERTS): the chips are rebuilt on every tick.
+              model: root.hasData ? Model.alertList(s) : []
 
               Rectangle {
                 required property var modelData
