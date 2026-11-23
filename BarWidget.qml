@@ -14,9 +14,9 @@ import "Model.js" as Model
 // publishes at start, or $XDG_STATE_HOME/starlinkd (default
 // ~/.local/state/starlinkd). Decided per tick (Model.pickSource, in tick()).
 // It also holds the daemon up: the service's starlinkd exits after 15 minutes
-// without a panel command or an `alive` ping, and this widget sends one at
-// start and every 5 minutes (see "daemon lifetime"), so the backend lives and
-// dies with the plugin.
+// without a panel command or an `alive` ping, and this widget sends one
+// (`starlinkd panel alive`) at start and every 5 minutes (see "daemon
+// lifetime"), so the backend lives and dies with the plugin.
 BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
@@ -309,9 +309,14 @@ BarWidget {
   // widget is what keeps it up — a ping at start and then every 5 minutes,
   // whatever the bar's visibility or the panel — so disabling or removing the
   // plugin takes its backend down within 15 minutes, and the next shell start
-  // brings it back. `starlinkd alive` goes through the runtime socket and
-  // needs no state dir. One reusable Process; a ping still running is not
-  // stacked on.
+  // brings it back. The ping goes through the runtime socket and needs no
+  // state dir. One reusable Process; a ping still running is not stacked on.
+  //
+  // It goes out as a `panel` subcommand on purpose. The socket command is
+  // `alive` either way, but a binary older than that mode takes a bare
+  // `starlinkd alive` as "run the daemon" (an unknown verb falls through to
+  // the default) and would start one, where `panel alive` — every binary since
+  // v1.1 — is rejected with the usage line, exit 2, starting nothing.
   function sendAlive(mayStart) {
     if (alivePing.running) return
     alivePing.mayStart = mayStart
@@ -321,11 +326,12 @@ BarWidget {
   Process {
     id: alivePing
     property bool mayStart: false
-    command: [root.binPath, "alive"]
+    command: [root.binPath, "panel", "alive"]
     onExited: function(exitCode) {
-      // Non-zero: nothing is listening. Only the start-of-session ping acts
-      // on it, by starting the service once and ignoring the result — a
-      // no-op when it already runs or is not installed.
+      // Non-zero: nothing is listening, or the binary predates the `alive`
+      // mode (the usage line, exit 2). Only the start-of-session ping acts on
+      // it, by starting the service once and ignoring the result — a no-op
+      // when it already runs or is not installed.
       if (exitCode !== 0 && mayStart) daemonStart.running = true
       mayStart = false
     }
