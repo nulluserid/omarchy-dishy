@@ -11,6 +11,20 @@ import (
 const maxEventBytes = 512 << 10 // rotate events.jsonl beyond this
 
 func stateDir() (string, error) {
+	// STARLINKD_STATE_DIR pins the whole state directory, ahead of
+	// XDG_STATE_HOME/HOME: the demo harness runs against a sandbox, and the
+	// widget can hand its one-shot CLI calls the directory it actually
+	// reads. Absolute only — a relative value is a misconfiguration and
+	// must fail loudly here, never fall back to the real state directory.
+	if dir := os.Getenv("STARLINKD_STATE_DIR"); dir != "" {
+		if !filepath.IsAbs(dir) {
+			return "", fmt.Errorf("STARLINKD_STATE_DIR %q is not an absolute path", dir)
+		}
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
+		return dir, os.Chmod(dir, 0o700)
+	}
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()

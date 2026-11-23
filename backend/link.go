@@ -14,8 +14,9 @@
 //	grace        — no evidence at all; keep showing for linkGraceWindow
 //	               (outage, captive portal, dish reboot), then hide
 //
-// The egress lookup is ifconfig.co/json (no key, documented ~1 request/min
-// courtesy limit): every geoInterval once the network is settled — on it, or
+// The egress lookup hits ifconfig.co/json by default (no key, documented
+// ~1 request/min courtesy limit; -geo-url overrides the endpoint for the
+// demo harness): every geoInterval once the network is settled — on it, or
 // a fresh answer naming another carrier — every geoTransitionInterval only
 // while classifying (no fresh answer yet, or right after a default-route
 // change), on a dashboard open when the answer is over the transition
@@ -39,7 +40,7 @@ import (
 	"time"
 )
 
-const geoEndpoint = "https://ifconfig.co/json"
+const defaultGeoEndpoint = "https://ifconfig.co/json"
 const maxGeoBytes = 1 << 20
 
 // updateRoute refreshes the default-route fingerprint. A change starts the
@@ -216,7 +217,7 @@ func (d *daemon) startGeoFetch() {
 	d.geoFetching = true
 	at := time.Now() // answer describes the network as of the request launch
 	go func() {
-		g, err := fetchGeo(at)
+		g, err := d.fetchGeo(at)
 		if err != nil {
 			d.vlog("geo: %v", err)
 		}
@@ -253,12 +254,13 @@ func (d *daemon) applyGeo(g geoInfo) {
 	d.updateLink(time.Now(), d.lastDishOK)
 }
 
-// fetchGeo performs one egress lookup. A failed call returns a zero geoInfo —
-// applyGeo keeps the previous result. Timestamped at `at` (the request
-// launch), so a lookup in flight during a route change can never masquerade
-// as a post-change answer.
-func fetchGeo(at time.Time) (geoInfo, error) {
-	return fetchGeoURL(at, geoEndpoint)
+// fetchGeo performs one egress lookup against the configured endpoint
+// (config.geoEndpoint). A failed call returns a zero geoInfo — applyGeo
+// keeps the previous result. Timestamped at `at` (the request launch), so a
+// lookup in flight during a route change can never masquerade as a
+// post-change answer.
+func (d *daemon) fetchGeo(at time.Time) (geoInfo, error) {
+	return fetchGeoURL(at, d.cfg.geoEndpoint)
 }
 
 func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {

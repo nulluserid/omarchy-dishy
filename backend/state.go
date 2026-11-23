@@ -70,6 +70,7 @@ type config struct {
 	mapInterval           time.Duration
 	geoInterval           time.Duration // egress lookup on the settled clock (on-network, or answered off-network)
 	geoTransitionInterval time.Duration // egress lookup while classifying / dashboard just opened
+	geoEndpoint           string        // egress lookup URL (-geo-url); the demo harness is its only user
 	once                  bool
 	verbose               bool
 	dir                   string // state dir, ~/.local/state/starlinkd
