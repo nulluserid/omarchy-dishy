@@ -43,12 +43,14 @@ the window is the day-history retention.
 Amendment (2026-11-23, marketplace review of v1.6.0): the obstruction map is
 bounded at the dish trust boundary — a coherent grid of at most 256x256
 cells and 1 MiB per reply ("Security hardening") — because the shell
-re-parses hist.json every 2 s while the dashboard is open. No file shape
-changes.
+re-parses hist.json every 2 s while the dashboard is open. The daemon also
+publishes its resolved state directory as the symlink
+`$XDG_RUNTIME_DIR/starlinkd` ("State directory"), so the QML consumers follow
+a non-default `XDG_STATE_HOME`. No file shape changes.
 
 The daemon writes these files, all atomic (tmp+rename), dir
-`~/.local/state/starlinkd/` (v4: daily.json and day-*.json live per dish in
-`dishes/<dish-id>/` there):
+`~/.local/state/starlinkd/` by default (see "State directory"; v4: daily.json
+and day-*.json live per dish in `dishes/<dish-id>/` there):
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
 (short probe burst) closed. (~1.5KB). Bar widget + panel read this.
@@ -260,6 +262,27 @@ Target precedence for the daemon and `set host`: explicit `-t` flag >
 config.json > 192.168.100.1:9200 (the one-shot `stow|unstow|reboot` controls
 resolve config.json > default when `-t` is absent). Deliberately no DNS
 fallback: a VPN or foreign network must not silently redirect dish traffic.
+
+## State directory
+
+The daemon resolves its state dir as `$XDG_STATE_HOME/starlinkd`, else
+`~/.local/state/starlinkd` when `XDG_STATE_HOME` is unset. The QML consumers
+see only the shell's environment, so at every daemon start — never for
+`-once` or the CLI subcommands — the daemon publishes the directory it
+resolved as the symlink `$XDG_RUNTIME_DIR/starlinkd` → that directory's
+absolute path. The link is created under a temp name beside it and renamed
+over the previous one, so consumers never see it missing or half-made. An
+unset `XDG_RUNTIME_DIR` publishes nothing and is not an error. A non-symlink
+occupant of that path (a real directory or file) is never removed or
+replaced: the daemon reports it and keeps running.
+
+Consumers resolve the state dir as: `$XDG_RUNTIME_DIR/starlinkd` when the
+link resolves, else `$XDG_STATE_HOME/starlinkd`, else
+`~/.local/state/starlinkd`. The link is authoritative whenever it resolves —
+it names the directory of the daemon's last start, so a user service
+configured with a different state directory (e.g. an
+`Environment=XDG_STATE_HOME=…` override on the unit) still feeds the widget
+and panel.
 
 ## Panel control socket (v2)
 

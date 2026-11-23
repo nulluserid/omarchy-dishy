@@ -127,6 +127,12 @@ func run(args []string) int {
 		return 0
 	}
 
+	// Daemon mode only (the -once block above and the CLI subcommands never
+	// get here): publish the state dir the QML consumers should read.
+	if err := publishStateDir(dir); err != nil {
+		fmt.Fprintf(osStderr, "starlinkd: %v (state dir not published to the widget)\n", err)
+	}
+
 	if err := d.startControl(); err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: %v (panel wake-ups disabled)\n", err)
 	}

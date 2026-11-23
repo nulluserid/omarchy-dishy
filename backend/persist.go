@@ -28,6 +28,54 @@ func stateDir() (string, error) {
 	return dir, os.Chmod(dir, 0o700)
 }
 
+// stateLinkName is the runtime-dir symlink naming the daemon's state dir for
+// consumers that cannot ask the daemon (CONTRACT.md "State directory").
+const stateLinkName = "starlinkd"
+
+// publishStateDir points $XDG_RUNTIME_DIR/starlinkd at the daemon's state
+// dir. The daemon honors XDG_STATE_HOME; the QML consumers see only the
+// shell's environment, so a user service configured with a different state
+// directory would keep updating files the UI never reads. The new link is
+// created under a temp name beside the target and renamed over the old one:
+// consumers never see it missing or half-made.
+//
+// An unset XDG_RUNTIME_DIR is a no-op — nowhere to publish, and the consumers
+// fall back to the same env resolution the daemon uses. The one thing never
+// done here is removing or replacing a non-symlink occupant of the path (a
+// real directory or file): it is the user's, so it is reported and left
+// alone. Errors are the caller's to log, never fatal.
+func publishStateDir(dir string) error {
+	runtime := os.Getenv("XDG_RUNTIME_DIR")
+	if runtime == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	link := filepath.Join(runtime, stateLinkName)
+	if fi, err := os.Lstat(link); err == nil {
+		if fi.Mode()&os.ModeSymlink == 0 {
+			return fmt.Errorf("%s exists and is not a symlink; left alone", link)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	// The Lstat/Rename pair is not atomic; the runtime dir is the user's own
+	// (0700), so only the user's processes could race it. The temp name is
+	// ours by pattern — a stale one means a killed predecessor with this pid.
+	tmp := filepath.Join(runtime, fmt.Sprintf(".%s.%d.tmp", stateLinkName, os.Getpid()))
+	os.Remove(tmp)
+	if err := os.Symlink(abs, tmp); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 // atomicWrite writes via tmp+rename so consumers never see partial files.
 // Mode 0600: state files carry the machine's public IP and location metadata.
 func atomicWrite(path string, data []byte) error {
