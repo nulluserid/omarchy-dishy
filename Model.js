@@ -8,6 +8,14 @@
 var OK_HEX = "#7cb342"
 var WARN_HEX = "#ffa000"
 
+// Mirrors of the daemon's bounds (backend/CONTRACT.md "hist.json"): the
+// obstruction map is at most MAX_MAP_DIM x MAX_MAP_DIM cells, which keeps a
+// daemon-written hist.json far below MAX_HIST_CHARS. Consumers refuse to
+// parse or draw anything beyond them — defense in depth behind the daemon,
+// which reads an unauthenticated dish endpoint.
+var MAX_MAP_DIM = 256
+var MAX_HIST_CHARS = 524288
+
 function parse(text) {
   try {
     var d = JSON.parse(String(text))
@@ -160,6 +168,45 @@ function decimate(values, buckets) {
   return out
 }
 
+// hist.json `map` as ObsMap draws it — {rows, cols, maxThetaDeg, snr} with
+// rows/cols integers in 1..MAX_MAP_DIM and snr exactly rows*cols finite
+// values in [-1, 1] — or null. maxThetaDeg is the map's own finite number,
+// 90 when missing or invalid. Never throws, so no hostile shape reaches the
+// Canvas loop.
+function validMap(m) {
+  if (!m || typeof m !== "object") return null
+  var rows = m.rows
+  var cols = m.cols
+  // Integers only (JSON 123.0 is 123; 123.5, strings and null are not dims).
+  if (typeof rows !== "number" || !isFinite(rows) || Math.floor(rows) !== rows) return null
+  if (typeof cols !== "number" || !isFinite(cols) || Math.floor(cols) !== cols) return null
+  if (rows < 1 || rows > MAX_MAP_DIM || cols < 1 || cols > MAX_MAP_DIM) return null
+  var snr = m.snr
+  if (!Array.isArray(snr) || snr.length !== rows * cols) return null
+  for (var i = 0; i < snr.length; i++) {
+    var v = snr[i]
+    if (typeof v !== "number" || !isFinite(v) || v < -1 || v > 1) return null
+  }
+  var theta = m.maxThetaDeg
+  if (typeof theta !== "number" || !isFinite(theta)) theta = 90
+  return { rows: rows, cols: cols, maxThetaDeg: theta, snr: snr }
+}
+
+// True when two validMap() results draw the same picture: both null, or
+// equal rows/cols/maxThetaDeg and an element-wise equal snr. Every hist.json
+// reload parses a fresh array, so identity cannot answer this.
+function sameMap(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.rows !== b.rows || a.cols !== b.cols || a.maxThetaDeg !== b.maxThetaDeg) return false
+  var x = a.snr
+  var y = b.snr
+  if (!x || !y || x.length !== y.length) return false
+  for (var i = 0; i < x.length; i++) {
+    if (x[i] !== y[i]) return false
+  }
+  return true
+}
+
 // "City, Region, CC" from the daemon's egress lookup; null when unknown.
 function geoPlace(geo) {
   var parts = geo ? [geo.city, geo.region, geo.country] : []
@@ -177,6 +224,19 @@ function dishDirName(id) {
   var s = String(id || "").toLowerCase().replace(/[^a-z0-9._-]/g, "-").substring(0, 64)
   if (s === "" || s === "." || s === "..") return "unknown"
   return s
+}
+
+// The daemon's state dir — mirror of its XDG_STATE_HOME handling: a set
+// XDG_STATE_HOME wins, else ~/.local/state under the home dir.
+function stateDirFor(xdgStateHome, home) {
+  return (xdgStateHome || home + "/.local/state") + "/starlinkd"
+}
+
+// Where the daemon publishes its real state dir as a symlink at start —
+// absent until it has run this session, and nowhere to publish when there is
+// no runtime dir: "" then.
+function linkedStateDirFor(xdgRuntimeDir) {
+  return xdgRuntimeDir ? xdgRuntimeDir + "/starlinkd" : ""
 }
 
 // One-line bar tooltip summary: state + live numbers + every active alert

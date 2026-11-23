@@ -30,10 +30,12 @@ Canvas {
     var ctx = getContext("2d")
     ctx.reset()
     if (width <= 0 || height <= 0 || rows <= 0 || cols <= 0 || !snr.length) return
-    // Defense in depth: rows/cols come from a daemon-parsed dish response.
-    // A hostile or incoherent grid (declared cells exceeding the delivered
-    // data, or absurd dims) must never drive this GUI-thread loop.
-    if (rows * cols > snr.length || rows > 1024 || cols > 1024) return
+    // Defense in depth: the panel binds only a Model.validMap() map, but
+    // this loop is the GUI-thread cost, so the daemon's contract is checked
+    // again here — rows and cols within MAX_MAP_DIM, and exactly rows*cols
+    // cells. A hostile or incoherent grid must never drive it.
+    if (rows > Model.MAX_MAP_DIM || cols > Model.MAX_MAP_DIM) return
+    if (rows * cols !== snr.length) return
     var size = Math.min(width, height)
     var ox = (width - size) / 2
     var oy = (height - size) / 2

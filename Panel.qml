@@ -6,7 +6,8 @@ import qs.Ui
 import "Model.js" as Model
 
 // Starlink dashboard. status.json flows in from the bar widget (injected as
-// `status`); hist.json is read ONLY while the panel is open (on open + 2s).
+// `status`); hist.json is read ONLY while the panel is open (on open + 2s),
+// from the daemon's state dir as the bar widget resolved it.
 Panel {
   id: root
   moduleName: "io.github.nulluserid.dishy"
@@ -21,7 +22,12 @@ Panel {
   readonly property color fg: root.barForeground
   readonly property color dim: Color.muted
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
-  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/starlinkd"
+  // The daemon's state dir as the bar widget resolved it (it follows the
+  // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
+  // once the daemon has published it). A binding, not a constant: a late
+  // switch in the bar widget rebinds histFile/dayFile with it.
+  readonly property string stateDir: root.hostWidget ? root.hostWidget.stateDir
+    : Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
   readonly property string binPath: decodeURIComponent(
     Qt.resolvedUrl("backend/bin/starlinkd").toString().replace(/^file:\/\//, ""))
 
@@ -34,15 +40,27 @@ Panel {
     : level === "bad" ? Color.urgent : Color.muted
   readonly property bool hasData: s !== null && !sStale
 
-  // hist.json: parsed only while open; null = unreadable/missing.
+  // hist.json: parsed only while open; null = unreadable/missing/oversize.
+  // map is its obstruction map after Model.validMap (null when absent or
+  // rejected). It is replaced only when the content differs, so the Canvas
+  // repaints on a real change — the daemon refreshes the map every 60 s —
+  // and not on every 2 s reload, whose parse yields a fresh, identical array.
   property var h: null
+  property var map: null
   function reloadHist() {
+    var raw = ""
     try {
       histFile.reload()
-      root.h = Model.parse(histFile.text())
+      raw = histFile.text()
+      // Size gate before the parse: the map bound keeps a daemon-written
+      // hist.json far below MAX_HIST_CHARS, so anything larger is not ours
+      // and must not reach JSON.parse on the GUI thread.
+      root.h = raw.length <= Model.MAX_HIST_CHARS ? Model.parse(raw) : null
     } catch (e) {
       root.h = null
     }
+    var next = Model.validMap(root.h ? root.h.map : null)
+    if (!Model.sameMap(root.map, next)) root.map = next
   }
 
   // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
@@ -132,6 +150,7 @@ Panel {
   function close() {
     root.controller.hide()
     root.h = null
+    root.map = null
     root.ctlResult = ""
     root.armedAction = ""
   }
@@ -600,10 +619,10 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   width: Style.space(84)
                   height: Style.space(84)
-                  snr: h && h.map ? h.map.snr : []
-                  rows: h && h.map ? h.map.rows : 0
-                  cols: h && h.map ? h.map.cols : 0
-                  maxThetaDeg: h && h.map ? h.map.maxThetaDeg : 90
+                  snr: root.map ? root.map.snr : []
+                  rows: root.map ? root.map.rows : 0
+                  cols: root.map ? root.map.cols : 0
+                  maxThetaDeg: root.map ? root.map.maxThetaDeg : 90
                   baseColor: root.dim
                 }
 
@@ -617,7 +636,7 @@ Panel {
                       { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
                       { label: "Time", value: Model.humanDur(s.obs.timeObstructedS) },
                       { label: "Valid", value: Model.humanDur(s.obs.validS) },
-                      { label: "FoV", value: "θ ≤ " + (h && h.map ? h.map.maxThetaDeg : 90) + "°" }
+                      { label: "FoV", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
                     ] : []
 
                     KVRow {

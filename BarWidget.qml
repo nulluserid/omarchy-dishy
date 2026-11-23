@@ -6,13 +6,22 @@ import qs.Ui
 import "Model.js" as Model
 
 // Bar readout (state dot + latency/down/icon) and host for the dashboard panel.
-// Reads ONLY ~/.local/state/starlinkd/status.json (CONTRACT.md).
+// Reads ONLY the daemon's status.json (CONTRACT.md), from the daemon's state
+// dir: $XDG_STATE_HOME/starlinkd (default ~/.local/state/starlinkd) until the
+// daemon's $XDG_RUNTIME_DIR/starlinkd symlink is seen, then that.
 BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
 
   readonly property string glyph: "\udb86\udc80"  // nf-md-satellite_uplink
-  readonly property string stateDir: Quickshell.env("HOME") + "/.local/state/starlinkd"
+
+  // The daemon honors XDG_STATE_HOME: a service on another state dir updates
+  // fine while a hardcoded ~/.local/state path shows nothing. It also
+  // publishes its real state dir as a symlink at $XDG_RUNTIME_DIR/starlinkd
+  // at start; the probe below flips `linked` once that file answers.
+  property bool linked: false
+  readonly property string stateDir: root.linked ? Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR"))
+    : Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
 
   // Parsed status.json (null = missing/corrupt) and 30s staleness flag.
   // (Not named `data`: that would shadow Item.data.)
@@ -99,6 +108,7 @@ BarWidget {
     }
     root.statusData = parsed
     root.stale = Model.isStale(parsed, Date.now() / 1000)
+    if (root.stale) root.refreshStateDir() // missing counts as stale
     root.nowS = Date.now() / 1000
     root.noteTypical(parsed)
     root.pushHostSetting()
@@ -106,7 +116,8 @@ BarWidget {
 
   // ---- dishHost setting → starlinkd ----
   // The manifest's dishHost setting is pushed to the daemon when it differs
-  // from the persisted config target (read once at start): a live `set host`
+  // from the persisted config target (read at start, and again when the state
+  // dir switches): a live `set host`
   // swap if the daemon runs, else config.json for the next start. Edits are
   // debounced (1.5 s stable) so typing prefixes never become live swaps, and
   // the daemon re-validates — a rejected value is remembered (no retry loop)
@@ -140,7 +151,10 @@ BarWidget {
     onTriggered: root.pushHostNow(root.pendingHost)
   }
 
-  FileView { id: configFile; path: root.stateDir + "/config.json"; blockLoading: true }
+  // blockAllReads, not blockLoading: after a state dir switch FileView keeps
+  // the previous file's text until the new read lands, and the seed has to
+  // see the config.json at the new path.
+  FileView { id: configFile; path: root.stateDir + "/config.json"; blockAllReads: true }
 
   Process {
     id: hostSet
@@ -152,15 +166,38 @@ BarWidget {
     }
   }
 
-  Component.onCompleted: {
-    // Seed the applied target from config.json: an unchanged setting is not
-    // re-pushed at every shell start; when it differs, the setting is the
-    // source of truth and pushes (manifest dishHost documents this).
+  // Seed the applied target from config.json: an unchanged setting is not
+  // re-pushed at every shell start; when it differs, the setting is the
+  // source of truth and pushes (manifest dishHost documents this). Repeated
+  // after a state dir switch, for the config.json at the new path — nothing
+  // readable there means nothing is applied yet.
+  function seedAppliedHost() {
     try {
       configFile.reload()
       var c = Model.parse(configFile.text())
-      if (c && c.target) root.appliedHost = String(c.target)
+      root.appliedHost = c && c.target ? String(c.target) : ""
     } catch (e) { }
+  }
+
+  // State dir probe: one small read, only while unlinked, so it can ride the
+  // tick — a daemon that starts after the shell, or runs on another state
+  // dir, is picked up without a shell restart.
+  function refreshStateDir() {
+    if (root.linked || Quickshell.env("XDG_RUNTIME_DIR") === "") return
+    try {
+      linkProbe.reload()
+      if (linkProbe.text() !== "") {
+        root.linked = true
+        root.seedAppliedHost()
+      }
+    } catch (e) { }
+  }
+
+  Component.onCompleted: {
+    // Resolve the state dir first: the seed must read the config.json at
+    // the path the widget ends up on.
+    root.refreshStateDir()
+    root.seedAppliedHost()
   }
 
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -197,6 +234,15 @@ BarWidget {
   }
 
   FileView { id: statusFile; path: root.stateDir + "/status.json"; blockLoading: true }
+
+  // The probe's "not found" is the normal state until the updated daemon has
+  // run this session, so it is not logged (the other FileViews' failures are).
+  FileView {
+    id: linkProbe
+    path: Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR")) + "/status.json"
+    blockLoading: true
+    printErrors: false
+  }
 
   Loader {
     id: panelLoader
