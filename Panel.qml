@@ -858,6 +858,10 @@ Panel {
     id: ctl
     property string action: ""
     command: []
+    // STARLINKD_STATE_DIR, as in the bar widget's hostSet: the controls read
+    // config.json for their target, so the CLI is pointed at the directory
+    // this panel reads.
+    environment: ({ STARLINKD_STATE_DIR: root.stateDir })
     stdout: StdioCollector { onStreamFinished: root.ctlOutput = text.trim() }
     stderr: StdioCollector { onStreamFinished: root.ctlErrText = text.trim() }
     onExited: function(exitCode) {

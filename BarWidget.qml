@@ -186,10 +186,16 @@ BarWidget {
   // see the config.json at the new path.
   FileView { id: configFile; path: root.stateDir + "/config.json"; blockAllReads: true }
 
+  // STARLINKD_STATE_DIR keeps the CLI on the directory this widget reads.
+  // With no daemon listening, `set host` writes config.json itself, and the
+  // service's own environment may resolve another dir than the widget did;
+  // the daemon gives the override highest precedence. clearEnvironment stays
+  // off, so the child keeps the rest of its inherited environment.
   Process {
     id: hostSet
     property string target: ""
     command: []
+    environment: ({ STARLINKD_STATE_DIR: root.stateDir })
     onExited: function(exitCode) {
       // Even on rejection, stop retrying the same value; the next edit retries.
       root.appliedHost = target
