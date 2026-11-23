@@ -2,6 +2,9 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -20,7 +23,7 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property color fg: root.barForeground
-  readonly property color dim: Color.muted
+  readonly property color dim: Commons.Color.muted
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // The daemon's state dir as the bar widget resolved it (it follows the
   // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
@@ -37,7 +40,7 @@ Panel {
   readonly property string level: status ? status.level : "none"
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Color.urgent : Color.muted
+    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
   readonly property bool hasData: s !== null && !sStale
 
   // hist.json: parsed only while open; null = unreadable, oversize or
@@ -172,7 +175,7 @@ Panel {
     var p50 = lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50)
     var p95 = lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
     var g = []
-    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Color.muted) })
+    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Commons.Color.muted) })
     if (p95 !== null) g.push({ value: p95, label: "p95 " + Math.round(p95), color: Model.WARN_HEX })
     return g
   }
@@ -432,7 +435,7 @@ Panel {
                 values: Model.decimate(h ? h.latencyMs : [], width)
                 guides: root.latencyGuides
                 autoScale: true
-                lineColor: Color.accent
+                lineColor: Commons.Color.accent
               }
 
               DropStrip {
@@ -495,7 +498,7 @@ Panel {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.downMbps : [], width)
                   maxValue: root.throughputMax
-                  lineColor: Color.accent
+                  lineColor: Commons.Color.accent
                   area: true
                 }
 
@@ -801,7 +804,7 @@ Panel {
               text: root.ctlResult
               textFormat: Text.PlainText
               elide: Text.ElideRight
-              color: root.ctlBusy ? root.dim : (root.ctlFailed ? Color.urgent : Model.OK_HEX)
+              color: root.ctlBusy ? root.dim : (root.ctlFailed ? Commons.Color.urgent : Model.OK_HEX)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -921,7 +924,7 @@ Panel {
       guides: gs.guides
       autoScale: gs.autoScale
       maxValue: gs.maxValue
-      lineColor: Color.accent
+      lineColor: Commons.Color.accent
     }
   }
 
@@ -971,16 +974,16 @@ Panel {
     implicitWidth: cbLabel.implicitWidth + Style.space(12)
     implicitHeight: Style.space(26)
     radius: Style.space(6)
-    color: armed ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.18) : "transparent"
+    color: armed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18) : "transparent"
     border.width: 1
-    border.color: armed ? Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
+    border.color: armed ? Commons.Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
 
     Text {
       id: cbLabel
       anchors.centerIn: parent
       text: cb.armed ? "Confirm?" : cb.title
       textFormat: Text.PlainText
-      color: cb.armed ? Color.urgent : root.fg
+      color: cb.armed ? Commons.Color.urgent : root.fg
       font.family: root.fontFamily
       font.pixelSize: Style.font.body
     }
@@ -1013,7 +1016,7 @@ Panel {
       ctx.fillStyle = Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.12)
       ctx.fillRect(0, 0, width, height)
       var step = width / drops.length
-      ctx.fillStyle = String(Color.urgent)
+      ctx.fillStyle = String(Commons.Color.urgent)
       for (var i = 0; i < drops.length; i++) {
         if (drops[i] === 1) ctx.fillRect(i * step, 0, Math.max(1, step), height)
       }

@@ -2,6 +2,9 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -65,7 +68,7 @@ BarWidget {
   readonly property string level: Model.level(root.statusData)
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Color.urgent : Color.muted
+    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
 
   // Typical-active hold: live.typicalDownMbps is null when the last minute
   // had too few active samples (idle link). Hold the last value for five
@@ -376,6 +379,6 @@ BarWidget {
     radius: height / 2
     color: root.stateColor
     border.width: 1
-    border.color: root.bar ? root.bar.background : Color.background
+    border.color: root.bar ? root.bar.background : Commons.Color.background
   }
 }

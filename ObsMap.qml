@@ -1,5 +1,8 @@
 import QtQuick
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 import "Model.js" as Model
 
 // Sky-coverage reticle over hist.map. On current Mini firmware the map is
@@ -15,7 +18,7 @@ Canvas {
   property int rows: 0
   property int cols: 0
   property real maxThetaDeg: 90
-  property color baseColor: Color.muted
+  property color baseColor: Commons.Color.muted
 
   implicitHeight: 140
 

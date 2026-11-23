@@ -4,7 +4,8 @@
 // (backend/CONTRACT.md). Everything degrades to placeholders, never throws.
 
 // Status colors that have no omarchy theme token (palette only defines
-// accent/urgent/muted). Red/gray map to Color.urgent/Color.muted in QML.
+// accent/urgent/muted). Red/gray map to Commons.Color.urgent/.muted in QML
+// (the palette is qualified there: Qt 6.12's own `Color` takes the bare name).
 var OK_HEX = "#7cb342"
 var WARN_HEX = "#ffa000"
 

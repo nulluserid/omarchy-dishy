@@ -1,5 +1,8 @@
 import QtQuick
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 
 // Line graph over a series where null entries are gaps (dropped samples).
 // Optional dashed, labeled guide lines and an area fill under the line.
@@ -9,7 +12,7 @@ Canvas {
   property var values: []
   property real maxValue: 100
   property bool autoScale: false
-  property color lineColor: Color.accent
+  property color lineColor: Commons.Color.accent
   property bool area: false
   property color fillColor: Qt.rgba(lineColor.r, lineColor.g, lineColor.b, 0.16)
   property var guides: []  // [{ value, label, color }]
