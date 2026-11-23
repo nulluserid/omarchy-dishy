@@ -58,7 +58,8 @@ The daemon writes these files, all atomic (tmp+rename), dir
 and day-*.json live per dish in `dishes/<dish-id>/` there):
 
 ## status.json — every tick: 2s with the dashboard open, 10s (idle) or 2s
-(short probe burst) closed. (~1.5KB). Bar widget + panel read this.
+(short probe burst — at most 20 bursts in any rolling hour) closed.
+(~1.5KB). Bar widget + panel read this.
 
 ```json
 {
@@ -327,7 +328,11 @@ it (connection swap + config persist). The daemon never blocks on it; failure to
 idle cadence. The lease covers a crashed shell: 90 s without a heartbeat and
 the daemon drops back to idle by itself — no permanent fast polling. A 30 s
 probe burst also runs once on the first failure after a good tick and on a
-default-route change — one-shot, never while the failure persists.
+default-route change — one-shot, never while the failure persists. A failure
+re-arms that burst at most 20 times in any rolling hour: past that a
+good→fail transition does not re-arm until the oldest counted one is an hour
+old, so a link that keeps flapping settles on the 10 s idle cadence, which
+still sees it recover. Route changes are not counted.
 
 A command counts only when a newline terminates it within 512 bytes,
 however many writes it arrives in; anything else — a peer that closes or

@@ -119,13 +119,47 @@ func (d *daemon) tick(active bool) {
 
 // postTick books the one-shot probe: only the transition into failure starts
 // a burst, so a machine parked away from the dish does not permanently poll
-// at 2 s.
+// at 2 s. The transition is not a free pass either: at most probeArmMax
+// bursts in any rolling probeArmWindow. A dish alternating good/fail gets
+// its first bursts and then the idle cadence, which still sees it recover —
+// without the bound it kept the daemon at 2 s indefinitely (measured). The
+// route-change re-arm is separate and stays as it is.
 func (d *daemon) postTick(now time.Time, ok bool) {
 	if !ok && d.lastTickOK {
-		d.probeUntil = now.Add(probeWindow)
-		d.vlog("failure probe: %s window", probeWindow)
+		switch {
+		case d.probeArmAllowed(now):
+			if d.probeHeld {
+				d.probeHeld = false
+				d.vlog("failure probe: re-armed again")
+			}
+			d.probeUntil = now.Add(probeWindow)
+			d.vlog("failure probe: %s window", probeWindow)
+		case !d.probeHeld: // logged on the edge only, not on every held transition
+			d.probeHeld = true
+			d.vlog("failure probe: not re-armed, %d bursts in the last %s", probeArmMax, probeArmWindow)
+		}
 	}
 	d.lastTickOK = ok
+}
+
+// probeArmAllowed records a failure-probe re-arm at now and reports whether
+// it fits the budget: at most probeArmMax in any rolling probeArmWindow. The
+// stamps live in one small slice, pruned in place, so nothing is allocated
+// once it is full.
+func (d *daemon) probeArmAllowed(now time.Time) bool {
+	cutoff := now.Add(-probeArmWindow)
+	kept := d.probeArms[:0]
+	for _, t := range d.probeArms {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	d.probeArms = kept
+	if len(kept) >= probeArmMax {
+		return false
+	}
+	d.probeArms = append(kept, now)
+	return true
 }
 
 // publishPendingTick writes status.json (no hist/day writes) for a debounced

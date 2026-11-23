@@ -59,6 +59,16 @@ const (
 	maxDishPartitions = 64
 )
 
+// Failure-probe re-arms are bounded (postTick): a dish alternating good/fail
+// would otherwise start a fresh 30 s fast-poll burst on every transition and
+// keep the daemon at the 2 s cadence indefinitely (measured). Past the bound
+// a transition does not re-arm until the oldest counted one has aged out of
+// the window. Route changes are not counted.
+const (
+	probeArmMax    = 20
+	probeArmWindow = time.Hour
+)
+
 // Array index order inside daemon.arrays.
 const (
 	aLat = iota
@@ -312,6 +322,8 @@ type daemon struct {
 	routeChanged         bool      // fingerprint changed since the last geo launch
 	lastRouteChangedUnix int64     // unix s of the last route change; gates egress outages
 	probeUntil           time.Time // one-shot fast-poll burst end
+	probeArms            []time.Time
+	probeHeld            bool
 	panelUntil           time.Time // dashboard-open lease end
 	lastTickAt           time.Time // previous round's tick time, for elapsed dt
 	lastTickOK           bool
