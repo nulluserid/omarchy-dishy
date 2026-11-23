@@ -212,7 +212,8 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// the panel is closed. On the first open the last map is minutes old —
 	// good enough until the next active due tick refreshes it.
 	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
-		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}}); m != nil {
+		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
+			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes)); m != nil {
 			d.mapData = toObsMap(m.GetDishGetObstructionMap())
 			d.lastMap = now
 		}
@@ -304,11 +305,13 @@ func (d *daemon) failTick(now time.Time, msg string, dt time.Duration, active bo
 	d.persist(now, sf, nil)
 }
 
-// fetch performs one unary Handle call; nil response on any failure.
-func (d *daemon) fetch(now time.Time, req *api.Request) *api.Response {
+// fetch performs one unary Handle call; nil response on any failure. opts
+// are per-call gRPC options — a reply cap belongs to the one RPC that needs
+// it, never to the client-wide default the other calls share.
+func (d *daemon) fetch(now time.Time, req *api.Request, opts ...grpc.CallOption) *api.Response {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
-	resp, err := d.client.Handle(ctx, req)
+	resp, err := d.client.Handle(ctx, req, opts...)
 	if err != nil {
 		d.warn(requestName(req) + ": " + rpcErr(err))
 		return nil
@@ -736,24 +739,55 @@ func (d *daemon) buildHist(now time.Time) *histFile {
 	}
 }
 
+// Obstruction-map bounds at the dish trust boundary. The endpoint is
+// unauthenticated, and the QML consumer visits every declared cell on the
+// GUI thread while re-parsing hist.json every 2 s — an unbounded map is a
+// shell stall the dish can trigger at will.
+const (
+	// maxObsMapDim caps each declared dimension. A real dish reports
+	// 123x123 (the live Mini; the round dish reported the same grid in
+	// 2021), so 256x256 leaves room without admitting stall-sized grids.
+	maxObsMapDim = 256
+	// maxObsMapRecvBytes caps the DishGetObstructionMap reply per call, not
+	// client-wide: a map at the bound is 256 KiB on the wire (packed
+	// float32), while GetHistory legitimately carries five 900-sample arrays
+	// and keeps the gRPC default.
+	maxObsMapRecvBytes = 1 << 20
+)
+
+// toObsMap converts a dish obstruction map into the published shape. The
+// QML consumer loops rows*cols on the GUI thread (ObsMap.qml), so a response
+// that is not a coherent, bounded grid is rejected WHOLE (nil) rather than
+// truncated or repaired — never trust a partial view of the sky.
 func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
 	if m == nil {
 		return nil
 	}
 	rows, cols := int(m.GetNumRows()), int(m.GetNumCols())
-	// A hostile response can declare absurd or incoherent grids; the QML
-	// consumer loops rows*cols on the GUI thread (ObsMap.qml), so a map
-	// that cannot be rendered from the delivered cells is rejected whole.
-	if rows < 1 || cols < 1 || rows > 2048 || cols > 2048 || rows*cols > len(m.GetSnr()) {
+	// Dimensions first: rows*cols is evaluated only once both are bounded,
+	// so uint32-max dims can never overflow the product.
+	if rows < 1 || cols < 1 || rows > maxObsMapDim || cols > maxObsMapDim {
 		return nil
 	}
-	snr := make([]float64, len(m.GetSnr()))
+	// Exactly the declared grid. The old rule (rows*cols <= len(snr)) let a
+	// response pad the file with every cell it delivered.
+	if len(m.GetSnr()) != rows*cols {
+		return nil
+	}
+	snr := make([]float64, rows*cols)
 	for i, v := range m.GetSnr() {
-		snr[i] = round(float64(v), 2)
+		c := round(float64(v), 2)
+		// CONTRACT.md: 0..1 per cell, -1 = no data. round() already maps
+		// NaN/Inf to 0; the finite term is stated anyway so what this
+		// accepts never silently depends on another function's behavior.
+		if math.IsNaN(c) || math.IsInf(c, 0) || c < -1 || c > 1 {
+			return nil
+		}
+		snr[i] = c
 	}
 	return &obsMap{
-		Rows:        int(m.GetNumRows()),
-		Cols:        int(m.GetNumCols()),
+		Rows:        rows,
+		Cols:        cols,
 		MaxThetaDeg: round(float64(m.GetMaxThetaDeg()), 1),
 		Snr:         snr,
 	}

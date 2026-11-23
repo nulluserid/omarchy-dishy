@@ -576,28 +576,71 @@ func TestControlLineTruncation(t *testing.T) {
 }
 
 func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
-	// The QML consumer loops rows*cols on the GUI thread: a map whose
-	// declared grid exceeds the delivered cells (or realistic dims) is
-	// rejected whole.
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 1000000, NumCols: 1000000, Snr: []float32{1},
-	}); m != nil {
-		t.Fatal("hostile 1e6 dims accepted")
+	// The dish endpoint is unauthenticated and the QML consumer loops
+	// rows*cols on the GUI thread, re-parsing hist.json every 2 s: a map
+	// that is not a coherent, bounded grid is rejected whole (nil).
+	grid := func(n int, v float32) []float32 {
+		s := make([]float32, n)
+		for i := range s {
+			s[i] = v
+		}
+		return s
 	}
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4294967295, NumCols: 4294967295, Snr: []float32{1},
-	}); m != nil {
-		t.Fatal("uint32-max dims accepted")
+	for _, tc := range []struct {
+		name       string
+		rows, cols uint32
+		snr        []float32
+	}{
+		{"hostile 1e6 dims", 1000000, 1000000, []float32{1}},
+		{"uint32-max dims", math.MaxUint32, math.MaxUint32, []float32{1}},
+		{"zero rows", 0, 4, nil},
+		{"zero cols", 4, 0, nil},
+		{"dim above the bound", maxObsMapDim + 1, 1, grid(maxObsMapDim+1, 0)},
+		{"fewer cells than declared", 4, 4, []float32{1, 2, 3}},
+		{"trailing cells", 4, 4, grid(17, 0)},
+		{"cell above the range", 4, 4, append(grid(15, 0), 1.01)},
+		{"cell below the range", 4, 4, append(grid(15, 0), -1.01)},
+	} {
+		if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: tc.rows, NumCols: tc.cols, Snr: tc.snr}); m != nil {
+			t.Errorf("%s: accepted %dx%d", tc.name, m.Rows, m.Cols)
+		}
 	}
-	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4, NumCols: 4, Snr: []float32{1, 2, 3},
-	}); m != nil {
-		t.Fatal("rows*cols > len(snr) accepted")
+	// The real dish shape (CONTRACT.md: 123x123) and a grid at the bound
+	// are accepted with exactly rows*cols rounded cells.
+	for _, tc := range []struct {
+		name       string
+		rows, cols int
+		cell       float32
+		want       float64
+	}{
+		{"real dish 123x123", 123, 123, -1, -1},
+		{"bound 256x256", maxObsMapDim, maxObsMapDim, 0.1, 0.1},
+	} {
+		m := toObsMap(&dish.DishGetObstructionMapResponse{
+			NumRows: uint32(tc.rows), NumCols: uint32(tc.cols), MaxThetaDeg: 90, Snr: grid(tc.rows*tc.cols, tc.cell)})
+		if m == nil {
+			t.Fatalf("%s: coherent map rejected", tc.name)
+		}
+		if m.Rows != tc.rows || m.Cols != tc.cols || len(m.Snr) != tc.rows*tc.cols {
+			t.Fatalf("%s: got %dx%d with %d cells", tc.name, m.Rows, m.Cols, len(m.Snr))
+		}
+		for _, v := range m.Snr {
+			if v != tc.want {
+				t.Fatalf("%s: cell = %v, want %v", tc.name, v, tc.want)
+			}
+		}
 	}
+	// 1 (a valid cell) is accepted like any other, beside the -1 sentinel.
+	if m := toObsMap(&dish.DishGetObstructionMapResponse{NumRows: 1, NumCols: 2, Snr: []float32{1, -1}}); m == nil || m.Snr[0] != 1 || m.Snr[1] != -1 {
+		t.Fatalf("edge cells: %+v", m)
+	}
+	// A non-finite cell is neutralized, not a rejection: round() maps
+	// NaN/Inf to 0 before the range check, so no published map can carry a
+	// value encoding/json would refuse.
 	if m := toObsMap(&dish.DishGetObstructionMapResponse{
-		NumRows: 4, NumCols: 4, Snr: make([]float32, 16),
-	}); m == nil {
-		t.Fatal("coherent map rejected")
+		NumRows: 1, NumCols: 2, Snr: []float32{float32(math.NaN()), float32(math.Inf(1))},
+	}); m == nil || m.Snr[0] != 0 || m.Snr[1] != 0 {
+		t.Fatalf("non-finite cells: %+v", m)
 	}
 }
 

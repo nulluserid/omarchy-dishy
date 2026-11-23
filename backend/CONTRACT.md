@@ -40,6 +40,12 @@ partitions roll their day files through the same 30-day window (see
 day-*.json), and legacy root-level day files share it. No configuration;
 the window is the day-history retention.
 
+Amendment (2026-11-23, marketplace review of v1.6.0): the obstruction map is
+bounded at the dish trust boundary — a coherent grid of at most 256x256
+cells and 1 MiB per reply ("Security hardening") — because the shell
+re-parses hist.json every 2 s while the dashboard is open. No file shape
+changes.
+
 The daemon writes these files, all atomic (tmp+rename), dir
 `~/.local/state/starlinkd/` (v4: daily.json and day-*.json live per dish in
 `dishes/<dish-id>/` there):
@@ -111,9 +117,11 @@ The daemon writes these files, all atomic (tmp+rename), dir
   answer describes the network as of then, so a lookup in flight during a
   route change can never pass for a post-change answer.
 
-## hist.json — 25KB, written ONLY on active (dashboard-open) ticks; the
-background cadence keeps the ring in memory and refreshes it every 60 s (also
-covering graph gaps across the idle stretch). Panel graphs read this.
+## hist.json — ~60KB with a real dish's 123x123 map (map ~41KB, ring ~21KB;
+## ~0.4MB at most at the map bound), written ONLY on active (dashboard-open)
+ticks; the background cadence keeps the ring in memory and refreshes it every
+60 s (also covering graph gaps across the idle stretch). Panel graphs read
+this.
 
 ```json
 {
@@ -126,7 +134,9 @@ covering graph gaps across the idle stretch). Panel graphs read this.
   "dropRate":   [0, 0, 1],
   "outages": [ { "cause": "BOOTING", "start": 1476462774, "durS": 112 } ],  // newest first, max 20
   "map": { "rows": 123, "cols": 123, "maxThetaDeg": 90.0,
-           "snr": [0..1 per cell, -1 = no data] }   // row-major, refreshed every 60s
+           "snr": [0..1 per cell, -1 = no data] }   // row-major, refreshed every 60s;
+                                                     // 1 ≤ rows,cols ≤ 256, exactly
+                                                     // rows·cols cells, else null
 }
 ```
 
@@ -283,8 +293,12 @@ ingested only when **all four** ring arrays are exactly ringSize (short or
 hostile responses are rejected whole); non-finite (NaN/Inf) samples are
 skipped and `round()` neutralizes non-finite floats so no state file can
 carry them (a marshal failure now keeps the last good file instead of writing
-an empty object); obstruction maps are rejected unless 1 ≤ rows,cols ≤ 2048
-and rows·cols ≤ len(snr) (ObsMap.qml additionally refuses incoherent grids);
+an empty object); obstruction maps (2026-11-23) are accepted only as a
+coherent bounded grid — 1 ≤ rows,cols ≤ 256, exactly rows·cols delivered
+cells, every cell finite in [-1, 1] after rounding — and rejected whole
+otherwise: a rejected grid publishes `map: null`, a reply that fails or
+exceeds its 1 MiB per-call cap keeps the last accepted map (ObsMap.qml
+additionally refuses incoherent grids);
 dish-reported outage starts are accepted only within the freshness window
 (never future-dated) and announcements are rate-limited to one per 60 s;
 dish-identity switches are debounced to 2 consecutive identical answers
