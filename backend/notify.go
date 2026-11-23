@@ -62,18 +62,25 @@ func (d *daemon) resolveNotifySend() error {
 		return fmt.Errorf("notify-send %s: %w", path, err)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	switch {
-	case !fi.Mode().IsRegular():
+	if !fi.Mode().IsRegular() {
 		return fmt.Errorf("notify-send %s: not a regular file", path)
-	case !ok:
+	}
+	if !ok {
 		return fmt.Errorf("notify-send %s: no owner information", path)
-	case st.Uid != 0 && int(st.Uid) != os.Geteuid():
-		// Neither root nor us: accepted only as root seen from a namespace
-		// that leaves host root unmapped (overflowRootUID).
+	}
+	// Owner decision: root, the daemon's euid, or — only inside a namespace
+	// that leaves host root unmapped — the kernel's overflow uid, which
+	// stands for root there (overflowRootUID). Anything else is refused.
+	if st.Uid != 0 && int(st.Uid) != os.Geteuid() {
 		if over, ok := overflowRootUID(); !ok || st.Uid != over {
 			return fmt.Errorf("notify-send %s: owned by uid %d, want root or %d", path, st.Uid, os.Geteuid())
 		}
-	case fi.Mode().Perm()&0o022 != 0:
+	}
+	// The write-bit rule runs after EVERY accepted owner, the namespace
+	// acceptance included. Sequential ifs on purpose: as cases of a switch,
+	// an accepted overflow owner ended the switch and a helper that was
+	// also writable by group/other slipped through.
+	if fi.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("notify-send %s: writable by group/other (%04o)", path, fi.Mode().Perm())
 	}
 	notifySendPath = path
