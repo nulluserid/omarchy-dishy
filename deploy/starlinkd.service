@@ -12,7 +12,24 @@ PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=256M
 UMask=0077
-ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd
+# More blast-radius limits: the daemon needs none of what these deny.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+SystemCallArchitectures=native
+# -idle-exit 15m (default 0 = never exit): once neither the widget's heartbeat
+# ("starlinkd alive", every 5 min) nor a panel command has arrived for 15 min,
+# the daemon exits cleanly, so a disabled or removed plugin takes its backend
+# down; the next shell start brings it back.
+ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd -idle-exit 15m
 Restart=on-failure
 RestartSec=5
 # notify-send needs the desktop session bus; omarchy exports it into the
