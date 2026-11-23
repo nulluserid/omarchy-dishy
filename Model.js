@@ -10,12 +10,14 @@ var WARN_HEX = "#ffa000"
 
 // Ceilings, in chars, for the state files the shell parses on the GUI
 // thread: each is the daemon's contract size with generous headroom
-// (backend/CONTRACT.md). A file past its ceiling is not one our daemon
+// (backend/CONTRACT.md). They sit above the conforming maximum of each
+// file — refusing one the daemon may legally write would blank the
+// dashboard, not bound it. A file past its ceiling is not one our daemon
 // wrote — parseBounded refuses it before JSON.parse. Defense in depth
 // behind the daemon, which caps what it writes from the unauthenticated
 // dish endpoint.
 var MAX_STATUS_CHARS = 65536   // status.json, ~1.5KB, parsed on every tick
-var MAX_HIST_CHARS = 524288    // hist.json, ~60KB on a real dish, ~0.4MB at the map bound
+var MAX_HIST_CHARS = 786432    // hist.json, ~60KB on a real dish, ≈ 506KB at the conforming max
 var MAX_DAY_CHARS = 262144     // day-YYYYMMDD.json, 1440 minute records ≈ 110KB
 var MAX_CONFIG_CHARS = 4096    // config.json, a target and a dish id
 
@@ -233,14 +235,33 @@ function geoPlace(geo) {
   return out.length ? out.join(", ") : null
 }
 
-// Dish partition directory for a dish id — mirror of starlinkd's
-// dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only (anything else
-// becomes "-"), capped at 64 chars, "."/".."/"" mapped to "unknown" so a
-// hostile id cannot escape the dishes/ directory.
+// Fallback partition directory for a dish id — for status.json without
+// `dish.dir`, i.e. older daemons (see dishDir). A re-implementation of
+// starlinkd's dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only
+// (anything else becomes "-"), capped at 64 chars, "."/".."/"" mapped to
+// "unknown" so a hostile id cannot escape the dishes/ directory. It counts
+// UTF-16 units where Go counts runes, so a non-ASCII id can name a
+// partition the daemon never wrote — which is why the daemon's own name is
+// preferred.
 function dishDirName(id) {
   var s = String(id || "").toLowerCase().replace(/[^a-z0-9._-]/g, "-").substring(0, 64)
   if (s === "" || s === "." || s === "..") return "unknown"
   return s
+}
+
+// Partition directory of the dish a status.json describes (CONTRACT.md v4:
+// dishes/<dir>/ under the state dir); "" when no dish is known. The
+// daemon's own `dish.dir` is used when it is a sane name: it is the
+// partition the daemon is ACTUALLY writing, which during an identity switch
+// is the current dish's, not the pending id's. Older daemons do not publish
+// it, and only then does the sanitized id stand in (dishDirName).
+function dishDir(status) {
+  var dish = status && status.dish ? status.dish : null
+  var dir = dish ? dish.dir : null
+  var id = dish ? String(dish.id || "") : ""
+  var fallback = id !== "" ? dishDirName(id) : ""
+  if (typeof dir !== "string" || !/^[a-z0-9._-]{1,64}$/.test(dir)) return fallback
+  return dir === "." || dir === ".." ? fallback : dir
 }
 
 // The daemon's state dir — mirror of its XDG_STATE_HOME handling: a set

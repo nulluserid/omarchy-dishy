@@ -63,13 +63,15 @@ Panel {
 
   // day-YYYYMMDD.json: per-minute day aggregates, read only while open;
   // null = unreadable/missing/oversize (empty Today graph).
-  // Lives in the current dish's partition (CONTRACT.md v4); the stamp
-  // re-binds at local midnight and the path follows the dish identity.
+  // Lives in the current dish's partition (CONTRACT.md v4): the daemon's
+  // own `dish.dir` names it (Model.dishDir), which during an identity switch
+  // is the current dish's partition, not the pending id's. Only older
+  // daemons lack the field; they get the sanitized id as a fallback.
+  // The stamp re-binds at local midnight; the path follows the dish.
   property var dayData: null
   property string dayStamp: Qt.formatDateTime(new Date(), "yyyyMMdd")
   readonly property string dayPath: {
-    var id = s && s.dish ? String(s.dish.id || "") : ""
-    var dir = id !== "" ? Model.dishDirName(id) : ""
+    var dir = Model.dishDir(s)
     return root.stateDir + (dir !== "" ? "/dishes/" + dir : "")
       + "/day-" + root.dayStamp + ".json"
   }
