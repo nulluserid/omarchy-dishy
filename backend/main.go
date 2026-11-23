@@ -2,7 +2,7 @@
 // files described in CONTRACT.md: status.json, hist.json, daily.json and
 // events.jsonl. It also offers one-shot control subcommands.
 //
-//	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-once] [-v]
+//	starlinkd [-t host:port] [-interval 2s] [-idle-interval 10s] [-idle-exit <duration>] [-once] [-v] [-geo-url https://ifconfig.co/json]
 //	starlinkd stow|unstow|reboot [-t host:port]
 //	starlinkd panel open|close|alive
 //	starlinkd set host <host[:port]>
