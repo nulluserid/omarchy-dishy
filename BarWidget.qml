@@ -23,7 +23,7 @@ BarWidget {
   readonly property string stateDir: root.linked ? Model.linkedStateDirFor(Quickshell.env("XDG_RUNTIME_DIR"))
     : Model.stateDirFor(Quickshell.env("XDG_STATE_HOME"), Quickshell.env("HOME"))
 
-  // Parsed status.json (null = missing/corrupt) and 30s staleness flag.
+  // Parsed status.json (null = missing/corrupt/oversize) and 30s staleness flag.
   // (Not named `data`: that would shadow Item.data.)
   property var statusData: null
   property bool stale: true
@@ -102,7 +102,9 @@ BarWidget {
     var parsed = null
     try {
       statusFile.reload()
-      parsed = Model.parse(statusFile.text())
+      // Bounded: this runs on every tick, so a status.json past the
+      // daemon's contract size is dropped as unreadable, never parsed.
+      parsed = Model.parseBounded(statusFile.text(), Model.MAX_STATUS_CHARS)
     } catch (e) {
       parsed = null
     }
@@ -174,7 +176,7 @@ BarWidget {
   function seedAppliedHost() {
     try {
       configFile.reload()
-      var c = Model.parse(configFile.text())
+      var c = Model.parseBounded(configFile.text(), Model.MAX_CONFIG_CHARS)
       root.appliedHost = c && c.target ? String(c.target) : ""
     } catch (e) { }
   }

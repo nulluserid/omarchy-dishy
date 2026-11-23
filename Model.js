@@ -8,13 +8,21 @@
 var OK_HEX = "#7cb342"
 var WARN_HEX = "#ffa000"
 
-// Mirrors of the daemon's bounds (backend/CONTRACT.md "hist.json"): the
-// obstruction map is at most MAX_MAP_DIM x MAX_MAP_DIM cells, which keeps a
-// daemon-written hist.json far below MAX_HIST_CHARS. Consumers refuse to
-// parse or draw anything beyond them — defense in depth behind the daemon,
-// which reads an unauthenticated dish endpoint.
+// Ceilings, in chars, for the state files the shell parses on the GUI
+// thread: each is the daemon's contract size with generous headroom
+// (backend/CONTRACT.md). A file past its ceiling is not one our daemon
+// wrote — parseBounded refuses it before JSON.parse. Defense in depth
+// behind the daemon, which caps what it writes from the unauthenticated
+// dish endpoint.
+var MAX_STATUS_CHARS = 65536   // status.json, ~1.5KB, parsed on every tick
+var MAX_HIST_CHARS = 524288    // hist.json, ~60KB on a real dish, ~0.4MB at the map bound
+var MAX_DAY_CHARS = 262144     // day-YYYYMMDD.json, 1440 minute records ≈ 110KB
+var MAX_CONFIG_CHARS = 4096    // config.json, a target and a dish id
+
+// The obstruction map's bound (hist.json `map`): at most MAX_MAP_DIM x
+// MAX_MAP_DIM cells, which is what keeps hist.json under MAX_HIST_CHARS.
+// Consumers refuse to draw anything beyond it.
 var MAX_MAP_DIM = 256
-var MAX_HIST_CHARS = 524288
 
 function parse(text) {
   try {
@@ -23,6 +31,15 @@ function parse(text) {
   } catch (e) {
     return null
   }
+}
+
+// parse() for a daemon-written file, refused as unreadable (null) when the
+// text runs past maxChars — one of the MAX_*_CHARS ceilings. The length
+// check runs before JSON.parse: the shell reads these files on the GUI
+// thread (status.json on every tick), so a file the daemon could not have
+// written is never parsed there.
+function parseBounded(text, maxChars) {
+  return String(text).length > maxChars ? null : parse(text)
 }
 
 function num(v, fallback) {

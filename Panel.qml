@@ -48,14 +48,12 @@ Panel {
   property var h: null
   property var map: null
   function reloadHist() {
-    var raw = ""
     try {
       histFile.reload()
-      raw = histFile.text()
-      // Size gate before the parse: the map bound keeps a daemon-written
-      // hist.json far below MAX_HIST_CHARS, so anything larger is not ours
-      // and must not reach JSON.parse on the GUI thread.
-      root.h = raw.length <= Model.MAX_HIST_CHARS ? Model.parse(raw) : null
+      // Bounded: the dish endpoint behind the map is unauthenticated, so a
+      // file past the daemon's contract size is dropped as unreadable
+      // before the parse, not parsed on the GUI thread.
+      root.h = Model.parseBounded(histFile.text(), Model.MAX_HIST_CHARS)
     } catch (e) {
       root.h = null
     }
@@ -63,7 +61,8 @@ Panel {
     if (!Model.sameMap(root.map, next)) root.map = next
   }
 
-  // day-YYYYMMDD.json: per-minute day aggregates, read only while open.
+  // day-YYYYMMDD.json: per-minute day aggregates, read only while open;
+  // null = unreadable/missing/oversize (empty Today graph).
   // Lives in the current dish's partition (CONTRACT.md v4); the stamp
   // re-binds at local midnight and the path follows the dish identity.
   property var dayData: null
@@ -78,7 +77,7 @@ Panel {
     root.dayStamp = Qt.formatDateTime(new Date(), "yyyyMMdd")
     try {
       dayFile.reload()
-      root.dayData = Model.parse(dayFile.text())
+      root.dayData = Model.parseBounded(dayFile.text(), Model.MAX_DAY_CHARS)
     } catch (e) {
       root.dayData = null
     }
