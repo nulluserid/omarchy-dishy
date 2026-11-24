@@ -66,9 +66,11 @@ BarWidget {
   }
 
   readonly property string level: Model.level(root.statusData)
+  // The panel maps the same levels the same way (Panel.qml stateColor).
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
+    : level === "bad" ? Commons.Color.urgent
+    : Qt.hsla(0, 0, Commons.Color.muted.hslLightness, 1)
 
   // Typical-active hold: live.typicalDownMbps is null when the last minute
   // had too few active samples (idle link). Hold the last value for five

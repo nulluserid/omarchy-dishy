@@ -23,7 +23,9 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property color fg: root.barForeground
-  readonly property color dim: Commons.Color.muted
+  // The house dim: every core panel darkens the foreground for labels. The
+  // palette's muted is a blue on some themes, which turned every label blue.
+  readonly property color dim: Qt.darker(root.fg, 1.4)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // The daemon's state dir as the bar widget resolved it (it follows the
   // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
@@ -38,9 +40,14 @@ Panel {
   readonly property var s: status ? status.statusData : null
   readonly property bool sStale: status ? status.stale : true
   readonly property string level: status ? status.level : "none"
+  // good/warn: Model.OK_HEX / Model.WARN_HEX; bad: the palette's urgent;
+  // none: the palette's muted with its colour taken out. Muted itself is a
+  // tinted blue on some themes, a step from the accent — not the grey the
+  // no-data dot is meant to be.
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
+    : level === "bad" ? Commons.Color.urgent
+    : Qt.hsla(0, 0, Commons.Color.muted.hslLightness, 1)
   readonly property bool hasData: s !== null && !sStale
 
   // hist.json: parsed only while open; null = unreadable, oversize or
@@ -175,7 +182,7 @@ Panel {
     var p50 = lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50)
     var p95 = lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
     var g = []
-    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Commons.Color.muted) })
+    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(root.dim) })
     if (p95 !== null) g.push({ value: p95, label: "p95 " + Math.round(p95), color: Model.WARN_HEX })
     return g
   }
@@ -636,7 +643,7 @@ Panel {
                   rows: root.map ? root.map.rows : 0
                   cols: root.map ? root.map.cols : 0
                   maxThetaDeg: root.map ? root.map.maxThetaDeg : 90
-                  baseColor: root.dim
+                  baseColor: root.fg
                 }
 
                 Column {

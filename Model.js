@@ -3,11 +3,14 @@
 // Pure parsing and formatting helpers for the starlinkd status/hist files
 // (backend/CONTRACT.md). Everything degrades to placeholders, never throws.
 
-// Status colors that have no omarchy theme token (palette only defines
-// accent/urgent/muted). Red/gray map to Commons.Color.urgent/.muted in QML
-// (the palette is qualified there: Qt 6.12's own `Color` takes the bare name).
-var OK_HEX = "#7cb342"
-var WARN_HEX = "#ffa000"
+// Status colors that have no omarchy theme token (the palette defines only
+// foreground/accent/urgent/muted, so there is nothing to derive a green or
+// an amber from). Two calm values that sit with pastel palettes: a soft
+// green, and a soft amber that means attention and nothing else. Red and
+// gray map to the palette in QML (qualified there: Qt 6.12's own `Color`
+// takes the bare name).
+var OK_HEX = "#8fbc8f"
+var WARN_HEX = "#e0b850"
 
 // Ceilings, in chars, for the state files the shell parses on the GUI
 // thread: each is the daemon's contract size with generous headroom
