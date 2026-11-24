@@ -26,12 +26,12 @@ data.
 
 - **Bar:** satellite glyph + health dot (green online / amber searching or
   attention / red offline / gray no data) and live latency, down throughput,
-  typical active throughput, or icon only (click the widget's settings).
-  Amber covers every attention-worthy dish alert (stuck motors, water,
-  slow ethernet, … — heating and power-save stay green), a pending
-  update reboot, and any disablement code; the tooltip lists all active
-  alerts plus the software-update state, so nothing the dish reports is
-  easy to miss.
+  typical active throughput, or icon only (click the widget's settings); on
+  a vertical bar it is the glyph alone. Amber covers every attention-worthy
+  dish alert (stuck motors, water, slow ethernet, … — heating and
+  power-save stay green), a pending update reboot, and any disablement
+  code. The tooltip leads with the state, up to three active alerts (the
+  rest are counted) and the software-update state, then the numbers.
 - **Auto-hide off-network (1.1):** when the machine is not on a Starlink
   network, the widget hides itself — the dish's exact gRPC target no longer
   answers *as a Starlink dish*, and your traffic provably exits through
@@ -49,15 +49,19 @@ data.
   plugin and its daemon exits by itself within 15 minutes. The next shell
   start brings it back.
 - **Panel** (click the widget; dense single-view grid, no scrolling):
-  - state chip, dish uptime + short id, hardware/software versions, GPS +
-    ethernet link
-  - latency graph (15 min, 1 s resolution, p50/p95 guides) beside
-    throughput (down fill / up line, typical-active readout) — drop strip
-    and 15-min drop stats under the latency plot
-  - Today chart (per-minute typical active throughput, 30-day rolling
-    history in `<state dir>/dishes/<dish-id>/day-YYYYMMDD.json`; the state
-    dir is `$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd`)
-    beside power draw
+  - a Starlink header: the state glyph, a status line (state · uptime ·
+    GPS satellites · ethernet link — a segment is left out when the dish
+    reports no reading for it, as current firmware does for GPS), and the
+    dish's short id with its hardware/software versions
+  - latency graph (15 min, 1 s resolution, p50/p95 as dashed guides with
+    their values in the header) beside throughput (down fill / up line,
+    each value in its series' colour) — drop strip and 15-min drop stats
+    under the latency plot
+  - Today chart (per-minute typical active throughput on a fixed 24-hour
+    axis, the day's peak in its header; 30-day rolling history in
+    `<state dir>/dishes/<dish-id>/day-YYYYMMDD.json`; the state dir is
+    `$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd`) beside
+    power draw
   - recent outages with cause and duration (dish-reported, latest three)
   - obstruction view (sky-coverage map + stats) beside the egress lookup:
     public IP + approximate exit city/region and carrier — one ifconfig.co
@@ -67,7 +71,8 @@ data.
     always uses IPv4, so the address and exit location it shows are the
     IPv4 ones; on an IPv6-only network there is no egress line.
   - one-line usage grid: today / all-time / availability
-  - active dish alert chips + software-update state
+  - up to three alert chips in the header row ("+N more" for the rest)
+    and the software-update state
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
 - **Multiple dishes (1.3):** stats are per dish. Move the machine between
   Starlinks (or change the dish address) and each dish keeps its own usage,

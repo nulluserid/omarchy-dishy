@@ -23,7 +23,12 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property color fg: root.barForeground
-  readonly property color dim: Commons.Color.muted
+  // The house dim: every core panel darkens the foreground for labels. The
+  // palette's muted is a blue on some themes, which turned every label blue.
+  readonly property color dim: Qt.darker(root.fg, 1.4)
+  // The up-link series and its header value: the foreground at 55 %, beside
+  // the accent-coloured downlink. It was amber, which is the attention colour.
+  readonly property color upColor: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // The daemon's state dir as the bar widget resolved it (it follows the
   // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
@@ -38,10 +43,42 @@ Panel {
   readonly property var s: status ? status.statusData : null
   readonly property bool sStale: status ? status.stale : true
   readonly property string level: status ? status.level : "none"
+  // good/warn: Model.OK_HEX / Model.WARN_HEX; bad: the palette's urgent;
+  // none: the palette's muted with its colour taken out. Muted itself is a
+  // tinted blue on some themes, a step from the accent — not the grey the
+  // no-data dot is meant to be.
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
+    : level === "bad" ? Commons.Color.urgent
+    : Qt.hsla(0, 0, Commons.Color.muted.hslLightness, 1)
   readonly property bool hasData: s !== null && !sStale
+
+  // The header's alert row, as chips: the alert labels that fit beside the
+  // title, "+N more" for the rest, then the update notice (Model.fitChips).
+  // Measured with the chip's own font, so what it counts as fitting is what
+  // the chips draw; the room is the header less the glyph and the title.
+  readonly property var alertChips: Model.fitChips(
+    Model.allAlertLabels(s), Model.updateNotice(s),
+    function(text) { return chipFont.advanceWidth(text) },
+    header.width - (heroGlyph.width + Style.space(14) + heroTitle.implicitWidth) - Style.space(10),
+    Style.spacing.sm, Style.space(6))
+
+  FontMetrics {
+    id: chipFont
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
+  }
+
+  // The controls' width: a button as the shell sizes it for the armed label,
+  // which every control is given.
+  Button {
+    id: confirmProbe
+    visible: false
+    text: "Confirm?"
+    fontSize: Style.font.bodySmall
+    fontFamily: root.fontFamily
+    bordered: true
+  }
 
   // hist.json: parsed only while open; null = unreadable, oversize or
   // malformed.
@@ -89,21 +126,18 @@ Panel {
     } catch (e) {
       root.dayData = null
     }
+    var now = new Date()
+    var next = Model.dayAxis(root.dayData, now.getHours() * 60 + now.getMinutes())
+    if (!Model.sameSeries(root.daySeries, next)) root.daySeries = next
   }
 
-  // Today's typical-down series so far (minute-of-day order, null gaps).
-  readonly property var daySeries: {
-    if (!root.dayData || !root.dayData.minutes) return []
-    var now = new Date()
-    var cur = now.getHours() * 60 + now.getMinutes()
-    var m = root.dayData.minutes
-    var out = []
-    for (var i = 0; i <= cur && i < m.length; i++) {
-      var v = m[i] ? m[i].downTyp : null
-      out.push(v ? v : null)
-    }
-    return out
-  }
+  // Today's typical-down series on the day's fixed axis (Model.dayAxis): one
+  // entry per minute of the day, null for a minute without data and for every
+  // minute still to come, so "now" sits at its place in the day and the plot
+  // does not look cut off in the morning. It is replaced only when its
+  // content differs (Model.sameSeries): the Canvas repaints on a real change
+  // and not on every 2 s reload, whose parse yields a fresh, identical file.
+  property var daySeries: []
 
   // Today's peak typical, for the section value line.
   readonly property var dayPeak: {
@@ -168,16 +202,29 @@ Panel {
     dashScroll.contentY = Math.max(0, Math.min(max, dashScroll.contentY + dy * 80))
   }
 
-  // p50/p95 guide lines: lat5m when fresh, else derived from the series.
-  readonly property var latencyGuides: {
+  // p50/p95: lat5m when fresh, else derived from the series. They are drawn
+  // as dashed guides and named once, in the latency header, instead of over
+  // the plot's newest samples.
+  readonly property var latencyP: {
     var lat = s && s.lat5m ? s.lat5m : {}
     var series = h ? h.latencyMs : []
-    var p50 = lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50)
-    var p95 = lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
+    return {
+      p50: lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50),
+      p95: lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
+    }
+  }
+  readonly property var latencyGuides: {
     var g = []
-    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(Commons.Color.muted) })
-    if (p95 !== null) g.push({ value: p95, label: "p95 " + Math.round(p95), color: Model.WARN_HEX })
+    if (latencyP.p50 !== null) g.push({ value: latencyP.p50, color: String(root.dim) })
+    if (latencyP.p95 !== null) g.push({ value: latencyP.p95, color: Model.WARN_HEX })
     return g
+  }
+  // "p50 24 · p95 26 ms": only the guides there are, the unit once.
+  readonly property string latencyGuideText: {
+    var parts = []
+    if (latencyP.p50 !== null) parts.push("p50 " + Math.round(latencyP.p50))
+    if (latencyP.p95 !== null) parts.push("p95 " + Math.round(latencyP.p95))
+    return parts.length ? parts.join(" · ") + " ms" : ""
   }
 
   // One shared y-scale for down+up so the two series are comparable.
@@ -205,7 +252,11 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(720))
-    contentHeight: panel.fittedContentHeight(Style.space(480))
+    // The dashboard's own height, capped: the card ends where its content
+    // does instead of holding a fixed height with an empty band under it.
+    // Until the daemon answers, it is sized to the two waiting lines.
+    contentHeight: panel.fittedContentHeight(
+      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(480))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -217,6 +268,7 @@ Panel {
 
       // Waiting for the daemon.
       Column {
+        id: waitingColumn
         anchors.centerIn: parent
         visible: !root.hasData
         spacing: Style.space(8)
@@ -256,71 +308,112 @@ Panel {
           width: dashScroll.width
           spacing: Style.space(6)
 
-          // ---- Header: state chip + identity (80s-readout dense) ----
-          Row {
-            id: headerRow
+          // ---- Header: hero (glyph · title · status · identity), alerts at right ----
+          Item {
+            id: header
             width: parent.width
-            spacing: Style.space(10)
+            implicitHeight: heroLabels.implicitHeight
 
-            Rectangle {
-              id: stateChip
-              implicitWidth: stateRow.implicitWidth + Style.space(16)
-              implicitHeight: Style.space(30)
-              radius: Style.space(5)
-              color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, 0.12)
-              border.width: 1
-              border.color: root.stateColor
-
-              Row {
-                id: stateRow
-                anchors.centerIn: parent
-                spacing: Style.space(7)
-
-                Rectangle {
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(8)
-                  height: width
-                  radius: height / 2
-                  color: root.stateColor
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.hasData ? Model.titleCase(s.state) : "NO DATA"
-                  textFormat: Text.PlainText
-                  color: root.fg
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                }
-              }
+            Text {
+              id: heroGlyph
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: Model.GLYPH
+              color: root.stateColor
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
             }
 
             Column {
+              id: heroLabels
+              anchors.left: heroGlyph.right
+              anchors.leftMargin: Style.space(14)
+              anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              width: headerRow.width - stateChip.implicitWidth - headerRow.spacing
-              spacing: 0
+              spacing: Style.space(2)
 
-              Text {
-                text: root.hasData
-                  ? "up " + Model.humanDur(s.dish ? s.dish.uptimeS : null)
-                    + " · GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—")
-                    + " · eth " + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
-                  : ""
-                textFormat: Text.PlainText
-                color: root.fg
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+              // As tall as an alert chip whether or not one is showing, so
+              // the bands below never move when alerts set or clear.
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(heroTitle.implicitHeight, heroIdentity.implicitHeight + Style.space(6))
+
+                Text {
+                  id: heroTitle
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "Starlink"
+                  elide: Text.ElideRight
+                  width: Math.max(0, Math.min(implicitWidth, parent.width - alertRow.width - Style.space(10)))
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+
+                // One line that never wraps: the alerts that fit beside the
+                // title, "+N more" for the rest, then the update notice.
+                Row {
+                  id: alertRow
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.spacing.sm
+
+                  Repeater {
+                    model: root.alertChips
+
+                    Rectangle {
+                      required property string modelData
+                      width: chipFont.advanceWidth(modelData) + 2 * Style.space(6)
+                      implicitHeight: chipLabel.implicitHeight + Style.space(6)
+                      radius: height / 2
+                      color: "transparent"
+                      border.width: 1
+                      border.color: Model.WARN_HEX
+
+                      Text {
+                        id: chipLabel
+                        anchors.fill: parent
+                        anchors.leftMargin: Style.space(6)
+                        anchors.rightMargin: Style.space(6)
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: modelData
+                        // The last resort, for a notice longer than the row.
+                        elide: Text.ElideRight
+                        color: Model.WARN_HEX
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+                }
               }
 
               Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: Model.headerSegments(root.hasData ? s : null).join(" · ").toUpperCase()
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+
+              Text {
+                id: heroIdentity
+                width: parent.width
                 text: root.hasData && s.dish
                   ? String(s.dish.id || "").substring(0, 8) + " · " + (s.dish.hw || "—")
                     + " · " + String(s.dish.sw || "—").split(".").slice(0, 3).join(".")
                   : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                width: Math.min(implicitWidth, headerRow.width - stateChip.implicitWidth - headerRow.spacing)
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -328,72 +421,11 @@ Panel {
             }
           }
 
-          // ---- Alert + update chips ----
-          Flow {
-            width: parent.width
-            spacing: Style.space(5)
-
-            Repeater {
-              // Capped (Model.MAX_ALERTS): the chips are rebuilt on every tick.
-              model: root.hasData ? Model.alertList(s) : []
-
-              Rectangle {
-                required property var modelData
-                implicitWidth: chipLabel.implicitWidth + Style.space(12)
-                implicitHeight: chipLabel.implicitHeight + Style.space(6)
-                radius: height / 2
-                color: "transparent"
-                border.width: 1
-                border.color: Model.WARN_HEX
-
-                Text {
-                  id: chipLabel
-                  anchors.centerIn: parent
-                  text: modelData && modelData.label ? String(modelData.label) : "alert"
-                  textFormat: Text.PlainText
-                  color: Model.WARN_HEX
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-            }
-
-            // Software update / state detail chip.
-            Rectangle {
-              visible: root.hasData && updateText !== ""
-              implicitWidth: updateLabel.implicitWidth + Style.space(12)
-              implicitHeight: updateLabel.implicitHeight + Style.space(6)
-              radius: height / 2
-              color: "transparent"
-              border.width: 1
-              border.color: Model.WARN_HEX
-
-              readonly property string updateText: {
-                if (!root.hasData) return ""
-                var u = s.update || {}
-                if (u.state === "REBOOT_REQUIRED") return "Software update — reboot required"
-                if (u.state === "FETCHING" || u.state === "WRITING")
-                  return "Software update — " + Model.fmtPct(u.progressPct * 100, 0)
-                if (u.state === "FAULTED") return "Software update — faulted"
-                var det = String(s.stateDetail || "")
-                if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
-                  return Model.titleCase(det)
-                return ""
-              }
-
-              Text {
-                id: updateLabel
-                anchors.centerIn: parent
-                text: parent.updateText
-                textFormat: Text.PlainText
-                color: Model.WARN_HEX
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-          }
-
           // ---- Graph grid (two columns, 80s-readout dense) ----
+          // Each plot spans at least its unit's floor and auto-scales for
+          // peaks above it: 50 ms of latency; 100 Mbps of downlink, the order
+          // of a healthy Starlink link, so an idle one sits low instead of
+          // filling the plot; over the day 100 Mbps; and 60 W.
           Row {
             width: parent.width
             spacing: Style.space(10)
@@ -405,21 +437,32 @@ Panel {
 
               Item {
                 width: parent.width
-                height: Math.max(latTitle.implicitHeight, latValue.implicitHeight)
+                height: Math.max(latTitle.implicitHeight, latGuides.implicitHeight, latValue.implicitHeight)
+
+                PanelSectionHeader {
+                  id: latTitle
+                  text: "Latency"
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  anchors.left: parent.left
+                }
 
                 Text {
-                  id: latTitle
-                  text: "LATENCY"
+                  id: latGuides
+                  anchors.left: latTitle.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.baseline: latTitle.baseline
                   textFormat: Text.PlainText
+                  text: root.latencyGuideText
                   color: root.dim
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+                  font.pixelSize: Style.font.caption
                 }
 
                 Text {
                   id: latValue
                   anchors.right: parent.right
+                  anchors.baseline: latTitle.baseline
                   text: Model.fmtMs(root.hasData && s.live ? s.live.latencyMs : null)
                   textFormat: Text.PlainText
                   color: root.fg
@@ -435,6 +478,7 @@ Panel {
                 values: Model.decimate(h ? h.latencyMs : [], width)
                 guides: root.latencyGuides
                 autoScale: true
+                maxValue: 50
                 lineColor: Commons.Color.accent
               }
 
@@ -447,7 +491,7 @@ Panel {
                 width: parent.width
                 text: root.hasData && s.drop15m
                   ? "drops " + Model.fmtPct(s.drop15m.ratio * 100, 2) + " · "
-                    + (s.drop15m.count15m || 0) + " ev · " + Model.humanDur(s.drop15m.totalOutageS)
+                    + (s.drop15m.count15m || 0) + " events · " + Model.humanDur(s.drop15m.totalOutageS) + " out"
                   : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
@@ -457,33 +501,46 @@ Panel {
               }
             }
 
-            // Throughput: down (fill) + up (line), legend line under.
+            // Throughput: down (fill) + up (line), keyed by colour in the header.
             Column {
               width: (parent.width - parent.spacing) / 2
               spacing: Style.space(3)
 
               Item {
                 width: parent.width
-                height: Math.max(thrTitle.implicitHeight, thrValue.implicitHeight)
+                height: Math.max(thrTitle.implicitHeight, thrDown.implicitHeight, thrUp.implicitHeight)
 
-                Text {
+                PanelSectionHeader {
                   id: thrTitle
-                  text: "THROUGHPUT"
+                  text: "Throughput"
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  anchors.left: parent.left
+                }
+
+                // The two series differ by colour alone, so each value is
+                // printed in its own series' colour. Siblings of the title,
+                // so each can sit on its baseline.
+                Text {
+                  id: thrUp
+                  anchors.right: parent.right
+                  anchors.baseline: thrTitle.baseline
                   textFormat: Text.PlainText
-                  color: root.dim
+                  text: root.hasData && s.live ? "↑" + Model.fmtMbps(s.live.upMbps) : ""
+                  color: root.upColor
                   font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
+                  font.pixelSize: Style.font.body
                   font.bold: true
                 }
 
                 Text {
-                  id: thrValue
-                  anchors.right: parent.right
-                  text: root.hasData && s.live
-                    ? "↓" + Model.fmtMbps(s.live.downMbps) + " ↑" + Model.fmtMbps(s.live.upMbps)
-                    : ""
+                  id: thrDown
+                  anchors.right: thrUp.left
+                  anchors.rightMargin: Style.space(6)
+                  anchors.baseline: thrTitle.baseline
                   textFormat: Text.PlainText
-                  color: root.fg
+                  text: root.hasData && s.live ? "↓" + Model.fmtMbps(s.live.downMbps) : ""
+                  color: Commons.Color.accent
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   font.bold: true
@@ -497,7 +554,7 @@ Panel {
                 Sparkline {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.downMbps : [], width)
-                  maxValue: root.throughputMax
+                  maxValue: Math.max(root.throughputMax, 100)
                   lineColor: Commons.Color.accent
                   area: true
                 }
@@ -505,22 +562,11 @@ Panel {
                 Sparkline {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.upMbps : [], width)
-                  maxValue: root.throughputMax
-                  lineColor: Model.WARN_HEX
+                  maxValue: Math.max(root.throughputMax, 100)
+                  lineColor: root.upColor
                 }
               }
 
-              Text {
-                width: parent.width
-                text: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-                  ? "typ ↓ " + Model.fmtMbps(s.live.typicalDownMbps)
-                  : "↓ down (fill) · ↑ up (line)"
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
             }
           }
 
@@ -531,22 +577,22 @@ Panel {
 
             GraphSection {
               width: root.hasPower ? (parent.width - parent.spacing) / 2 : parent.width
-              title: "TODAY"
-              valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-                ? Model.fmtMbps(s.live.typicalDownMbps)
-                : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
+              title: "Today"
+              valueText: root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—"
               series: root.daySeries
               autoScale: true
+              maxValue: 100
               plotHeight: 38
             }
 
             GraphSection {
               visible: root.hasPower
               width: (parent.width - parent.spacing) / 2
-              title: "POWER"
+              title: "Power"
               valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
               series: Model.decimate(h ? h.powerW : [], width)
               autoScale: true
+              maxValue: 60
               plotHeight: 38
             }
           }
@@ -561,16 +607,15 @@ Panel {
               width: parent.width
               spacing: Style.space(6)
 
-              Text {
-                text: "OUTAGES"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                id: outTitle
+                text: "Outages"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Text {
+                anchors.baseline: outTitle.baseline
                 text: h && h.outages ? h.outages.length + " recent" : ""
                 textFormat: Text.PlainText
                 color: root.dim
@@ -609,13 +654,10 @@ Panel {
               width: parent.width * 0.55 - parent.spacing / 2
               spacing: Style.space(3)
 
-              Text {
-                text: "OBSTRUCTION"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                text: "Obstruction"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Row {
@@ -631,7 +673,7 @@ Panel {
                   rows: root.map ? root.map.rows : 0
                   cols: root.map ? root.map.cols : 0
                   maxThetaDeg: root.map ? root.map.maxThetaDeg : 90
-                  baseColor: root.dim
+                  baseColor: root.fg
                 }
 
                 Column {
@@ -642,9 +684,9 @@ Panel {
                   Repeater {
                     model: root.hasData && s.obs ? [
                       { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
-                      { label: "Time", value: Model.humanDur(s.obs.timeObstructedS) },
-                      { label: "Valid", value: Model.humanDur(s.obs.validS) },
-                      { label: "FoV", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
+                      { label: "Time obstructed", value: Model.humanDur(s.obs.timeObstructedS) },
+                      { label: "Valid for", value: Model.humanDur(s.obs.validS) },
+                      { label: "Field of view", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
                     ] : []
 
                     KVRow {
@@ -662,13 +704,10 @@ Panel {
               width: parent.width * 0.45 - parent.spacing / 2
               spacing: Style.space(3)
 
-              Text {
-                text: "CONNECTION"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                text: "Connection"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Column {
@@ -688,7 +727,7 @@ Panel {
                 }
                 KVRow {
                   small: true
-                  label: "Net"
+                  label: "Carrier"
                   value: root.hasData && s.geo
                     ? (s.geo.org ? String(s.geo.org) : "—") + (s.geo.asn ? " (" + s.geo.asn + ")" : "")
                     : ""
@@ -718,49 +757,30 @@ Panel {
           }
 
           // ---- Usage / availability grid ----
-          PanelSeparator { foreground: root.fg }
-
           Row {
             width: parent.width
             spacing: Style.space(12)
 
-            Text {
+            UsageCell {
               width: (parent.width - 2 * parent.spacing) * 0.32
-              text: root.hasData && s.usage
-                ? "TODAY ↓ " + Model.fmtGB(s.usage.downGB) + " ↑ " + Model.fmtGB(s.usage.upGB)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+              label: "Today"
+              value: root.hasData && s.usage
+                ? "↓ " + Model.fmtGB(s.usage.downGB) + " ↑ " + Model.fmtGB(s.usage.upGB) : ""
             }
 
-            Text {
-              width: (parent.width - 2 * parent.spacing) * 0.40
-              text: root.hasData && s.usage
-                ? "ALL-TIME ↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+            UsageCell {
+              width: (parent.width - 2 * parent.spacing) * 0.32
+              label: "All-time"
+              value: root.hasData && s.usage
+                ? "↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB) : ""
             }
 
-            Text {
-              width: (parent.width - 2 * parent.spacing) * 0.28
-              text: root.hasData && s.avail
-                ? "AVAIL " + Model.fmtPct(s.avail.todayPct, 1) + " / " + Model.fmtPct(s.avail.sessionPct, 1)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+            // 36 %: the widest cell, so "99.5% today / 100.0% session" fits.
+            UsageCell {
+              width: (parent.width - 2 * parent.spacing) * 0.36
+              label: "Avail"
+              value: root.hasData && s.avail
+                ? Model.fmtPct(s.avail.todayPct, 1) + " today / " + Model.fmtPct(s.avail.sessionPct, 1) + " session" : ""
             }
           }
 
@@ -772,28 +792,42 @@ Panel {
             Row {
               spacing: Style.space(8)
 
-              Text {
+              PanelSectionHeader {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "CONTROLS"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+                text: "Controls"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Repeater {
+                // drops: the control takes the link down.
                 model: [
-                  { action: "stow", title: "Stow" },
-                  { action: "unstow", title: "Unstow" },
-                  { action: "reboot", title: "Reboot" }
+                  { action: "stow", title: "Stow", drops: true },
+                  { action: "unstow", title: "Unstow", drops: false },
+                  { action: "reboot", title: "Reboot", drops: true }
                 ]
 
-                ConfirmButton {
+                Button {
                   required property var modelData
-                  action: modelData.action
-                  title: modelData.title
-                  onFired: function(a) { root.runCtl(a) }
+                  readonly property bool armed: root.armedAction === modelData.action
+                  // Sized for the armed label, the longest one, so arming a
+                  // button moves nothing under the pointer.
+                  width: confirmProbe.implicitWidth
+                  text: armed ? "Confirm?" : modelData.title
+                  fontSize: Style.font.bodySmall
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  // Stow and Reboot drop the link, so they are urgent at
+                  // rest, as the shell marks a destructive choice; armed
+                  // is urgent whatever the control is.
+                  foreground: armed || modelData.drops ? Commons.Color.urgent : root.fg
+                  accent: armed ? Commons.Color.urgent : Commons.Color.accent
+                  active: armed
+                  onClicked: {
+                    if (root.ctlBusy) return
+                    if (!armed) root.armedAction = modelData.action
+                    else root.runCtl(modelData.action)
+                  }
                 }
               }
             }
@@ -808,16 +842,6 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
-          }
-
-          Text {
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: "Esc  close   ·   ↑ ↓  scroll"
-            textFormat: Text.PlainText
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
           }
         }
       }
@@ -881,6 +905,38 @@ Panel {
     }
   }
 
+  // One usage figure: a dim label and a bold value on one line, as every
+  // other label/value pair in the panel; the value elides when the cell is
+  // too narrow for it.
+  component UsageCell: Row {
+    id: cell
+    property string label: ""
+    property string value: ""
+
+    spacing: Style.space(4)
+
+    Text {
+      id: cellLabel
+      textFormat: Text.PlainText
+      text: cell.label
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    Text {
+      anchors.baseline: cellLabel.baseline
+      textFormat: Text.PlainText
+      text: cell.value
+      elide: Text.ElideRight
+      width: Math.max(0, Math.min(implicitWidth, cell.width - cellLabel.width - cell.spacing))
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: true
+    }
+  }
+
   // Section title + current value on one line, graph below.
   component GraphSection: Column {
     id: gs
@@ -899,19 +955,18 @@ Panel {
       width: parent.width
       height: Math.max(gsTitle.implicitHeight, gsValue.implicitHeight)
 
-      Text {
+      PanelSectionHeader {
         id: gsTitle
         text: gs.title
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
+        foreground: root.fg
+        fontFamily: root.fontFamily
+        anchors.left: parent.left
       }
 
       Text {
         id: gsValue
         anchors.right: parent.right
+        anchors.baseline: gsTitle.baseline
         text: gs.valueText
         textFormat: Text.PlainText
         color: root.fg
@@ -964,42 +1019,6 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: kv.small ? Style.font.bodySmall : Style.font.body
       font.bold: kv.bold
-    }
-  }
-
-  component ConfirmButton: Rectangle {
-    id: cb
-    property string action: ""
-    property string title: ""
-    signal fired(string action)
-
-    readonly property bool armed: root.armedAction === action
-
-    implicitWidth: cbLabel.implicitWidth + Style.space(12)
-    implicitHeight: Style.space(26)
-    radius: Style.space(6)
-    color: armed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18) : "transparent"
-    border.width: 1
-    border.color: armed ? Commons.Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
-
-    Text {
-      id: cbLabel
-      anchors.centerIn: parent
-      text: cb.armed ? "Confirm?" : cb.title
-      textFormat: Text.PlainText
-      color: cb.armed ? Commons.Color.urgent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      cursorShape: Qt.PointingHandCursor
-      onClicked: {
-        if (root.ctlBusy) return
-        if (!cb.armed) root.armedAction = cb.action
-        else cb.fired(cb.action)
-      }
     }
   }
 

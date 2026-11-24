@@ -3,11 +3,14 @@
 // Pure parsing and formatting helpers for the starlinkd status/hist files
 // (backend/CONTRACT.md). Everything degrades to placeholders, never throws.
 
-// Status colors that have no omarchy theme token (palette only defines
-// accent/urgent/muted). Red/gray map to Commons.Color.urgent/.muted in QML
-// (the palette is qualified there: Qt 6.12's own `Color` takes the bare name).
-var OK_HEX = "#7cb342"
-var WARN_HEX = "#ffa000"
+// Status colors that have no omarchy theme token (the palette defines only
+// foreground/accent/urgent/muted, so there is nothing to derive a green or
+// an amber from). Two calm values that sit with pastel palettes: a soft
+// green, and a soft amber that means attention and nothing else. Red and
+// gray map to the palette in QML (qualified there: Qt 6.12's own `Color`
+// takes the bare name).
+var OK_HEX = "#8fbc8f"
+var WARN_HEX = "#e0b850"
 
 // Ceilings, in chars, for the state files the shell parses on the GUI
 // thread: each is the daemon's contract size with generous headroom
@@ -31,6 +34,13 @@ var MAX_MAP_DIM = 256
 // most 19 (one per dish alert flag); the cap keeps every loop over them —
 // tooltip, bar level, the panel's chips — from scaling with file content.
 var MAX_ALERTS = 64
+
+// Alert labels the panel's row and the bar tooltip name before the rest fold
+// into one "+N more".
+var MAX_ROW_LABELS = 3
+
+// The satellite glyph the bar widget and the panel's header share.
+var GLYPH = "\udb86\udc80"  // nf-md-satellite_uplink
 
 function parse(text) {
   try {
@@ -80,8 +90,9 @@ function alertList(status) {
   return alerts.length > MAX_ALERTS ? alerts.slice(0, MAX_ALERTS) : alerts
 }
 
-// Every alert the dish currently reports, as labels — the full set, shown in
-// the tooltip so nothing the dish knows stays hidden from the user.
+// Every alert the dish currently reports, as labels — in the daemon's order,
+// its most severe first. The panel's row and the tooltip name the leading
+// ones (fitChips, summary) and count the rest.
 function allAlertLabels(status) {
   var out = []
   var alerts = alertList(status)
@@ -106,6 +117,45 @@ function actionAlertLabels(status) {
     out.push(a.label ? String(a.label) : titleCase(id))
   }
   return out
+}
+
+// The panel's alert row as one line that never wraps: the first alert labels,
+// "+N more" for the rest, then the update notice, taking alert labels only
+// while everything fits in width. measure(text) gives a label's width in the
+// chip's font, gap the space between chips and pad the space on each side of
+// a label. At most MAX_ROW_LABELS labels are named however wide the row, and
+// an alert never pushes the notice out. Returns the chip texts in display
+// order — nothing when there is nothing to show. A notice too long for the
+// row is returned anyway: the caller's elide is the last resort.
+function fitChips(labels, updateText, measure, width, gap, pad) {
+  var list = Array.isArray(labels) ? labels : []
+  var n = list.length
+  var notice = updateText ? [String(updateText)] : []
+  var take = Math.min(n, MAX_ROW_LABELS)
+  for (;;) {
+    var chips = list.slice(0, take)
+    if (n > take) chips.push("+" + (n - take) + " more")
+    chips = chips.concat(notice)
+    var w = gap * Math.max(0, chips.length - 1)
+    for (var i = 0; i < chips.length; i++) w += measure(chips[i]) + pad * 2
+    if (w <= width || take === 0) return chips
+    take -= 1
+  }
+}
+
+// The one notice a software update or a disablement state raises, worded the
+// same on the panel's alert row and in the bar tooltip.
+function updateNotice(status) {
+  if (!status) return ""
+  var u = status.update || {}
+  if (u.state === "REBOOT_REQUIRED") return "Update — reboot required"
+  if (u.state === "FETCHING" || u.state === "WRITING")
+    return "Update — " + fmtPct(u.progressPct * 100, 0)
+  if (u.state === "FAULTED") return "Update — faulted"
+  var det = String(status.stateDetail || "")
+  if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
+    return titleCase(det)
+  return ""
 }
 
 // good = ONLINE with no attention-worthy alert, warn = SEARCHING/BOOTING or
@@ -166,6 +216,30 @@ function fmtGB(v) {
 function fmtPct(v, decimals) {
   var n = num(v)
   return n === null ? "—" : n.toFixed(decimals === undefined ? 1 : decimals) + "%"
+}
+
+// The panel header's status line as segments, in order: state, uptime,
+// satellite count, interface speed. A segment the dish gave no reading for
+// is left out together with its separator. The daemon publishes proto3
+// defaults for whatever the dish did not report — an uptime of 0, which its
+// own BOOTING test reads the same way; an interface speed of 0; and on
+// firmware 2026.11.09 no GPS fields at all, only `valid: false, sats: 0` —
+// and those would otherwise print as a permanent "0s" or dash. Join with the
+// separator of your choice; [] when there is no status.
+function headerSegments(status) {
+  var out = []
+  if (!status) return out
+  var st = titleCase(status.state)
+  if (st) out.push(st)
+  var dish = status.dish
+  var up = dish ? num(dish.uptimeS) : null
+  if (up !== null && up > 0) out.push("up " + humanDur(up))
+  var gps = status.gps
+  var sats = gps && gps.valid ? num(gps.sats) : null
+  if (sats !== null && sats > 0) out.push("GPS " + sats + " sats")
+  var eth = dish ? num(dish.ethMbps) : null
+  if (eth !== null && eth > 0) out.push("eth " + fmtMbps(eth))
+  return out
 }
 
 // Nearest-rank percentile over non-null entries; null when no data.
@@ -278,6 +352,38 @@ function sameMap(a, b) {
   return true
 }
 
+// Minutes in the day file's fixed axis (CONTRACT.md "day-YYYYMMDD.json").
+var DAY_MINUTES = 1440
+
+// A day file's typical-down series on a fixed 24-hour axis: one entry per
+// minute of the day in minute-of-day order — null for a minute without data
+// and for every minute after `now` (the minute of the day), which the daemon
+// has not written yet. So "now" sits at its place in the day and the plot
+// does not look cut off in the morning. The file's own layout does not
+// change: this reads it exactly as the growing plot did.
+function dayAxis(dayData, now) {
+  var out = []
+  var m = dayData && dayData.minutes ? dayData.minutes : []
+  var last = Math.min(Math.max(0, Math.floor(num(now, 0))), DAY_MINUTES - 1)
+  for (var i = 0; i < DAY_MINUTES; i++) {
+    var v = i <= last && i < m.length ? m[i] : null
+    out.push(v && v.downTyp ? v.downTyp : null)
+  }
+  return out
+}
+
+// True when two series draw the same line: equal length and element-wise
+// equal (a gap equals a gap). The day series is rebuilt on every reload, so
+// identity cannot answer this — only a series that changed replaces the last.
+function sameSeries(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 // "City, Region, CC" from the daemon's egress lookup; null when unknown.
 function geoPlace(geo) {
   var parts = geo ? [geo.city, geo.region, geo.country] : []
@@ -369,29 +475,24 @@ function pickSource(current, read, nowS, hasRuntime) {
   return result
 }
 
-// One-line bar tooltip summary: state + live numbers + every active alert
-// and the software-update state, so a glance at the tooltip never misses
-// what the dish is telling us.
+// One-line bar tooltip: the state first, then what asks for attention — up
+// to MAX_ROW_LABELS alerts, "+N more" for the rest, and the update notice —
+// and only then the live numbers, so trouble is read before the line runs
+// long. One line without wrapping: the bar draws it as a single Text.
 function summary(status) {
   if (!status) return "Starlink — waiting for starlinkd"
   var st = String(status.state || "NO_DATA")
   if (st === "NO_DATA" || st === "") return "Starlink — waiting for starlinkd"
   var live = status.live || {}
   var parts = [titleCase(st)]
+  var alerts = allAlertLabels(status)
+  for (var i = 0; i < alerts.length && i < MAX_ROW_LABELS; i++) parts.push("⚠ " + alerts[i])
+  if (alerts.length > MAX_ROW_LABELS) parts.push("⚠ +" + (alerts.length - MAX_ROW_LABELS) + " more")
+  var notice = updateNotice(status)
+  if (notice !== "") parts.push(notice)
   if (live.latencyMs !== null && live.latencyMs !== undefined) parts.push(fmtMs(live.latencyMs))
   if (live.downMbps !== null && live.downMbps !== undefined)
     parts.push("↓" + fmtMbps(live.downMbps) + " ↑" + fmtMbps(live.upMbps))
-  if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
-    parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
   if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
-  var alerts = allAlertLabels(status)
-  for (var i = 0; i < alerts.length; i++) parts.push("⚠ " + alerts[i])
-  var det = String(status.stateDetail || "")
-  if (det !== "" && det.indexOf("REBOOT") < 0) parts.push(titleCase(det))
-  var u = status.update || {}
-  if (u.state === "REBOOT_REQUIRED") parts.push("update: reboot required")
-  else if (u.state === "FETCHING" || u.state === "WRITING")
-    parts.push("update: " + fmtPct(u.progressPct * 100, 0))
-  else if (u.state === "FAULTED") parts.push("update: faulted")
   return parts.join("  ·  ")
 }

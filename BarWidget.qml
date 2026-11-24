@@ -21,7 +21,7 @@ BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
 
-  readonly property string glyph: "\udb86\udc80"  // nf-md-satellite_uplink
+  readonly property string glyph: Model.GLYPH  // nf-md-satellite_uplink, shared with the panel header
 
   // The daemon honors XDG_STATE_HOME: a service on another state dir updates
   // fine while a hardcoded ~/.local/state path shows nothing. It also
@@ -66,9 +66,11 @@ BarWidget {
   }
 
   readonly property string level: Model.level(root.statusData)
+  // The panel maps the same levels the same way (Panel.qml stateColor).
   readonly property color stateColor: level === "good" ? Model.OK_HEX
     : level === "warn" ? Model.WARN_HEX
-    : level === "bad" ? Commons.Color.urgent : Commons.Color.muted
+    : level === "bad" ? Commons.Color.urgent
+    : Qt.hsla(0, 0, Commons.Color.muted.hslLightness, 1)
 
   // Typical-active hold: live.typicalDownMbps is null when the last minute
   // had too few active samples (idle link). Hold the last value for five
@@ -113,6 +115,11 @@ BarWidget {
   }
 
   readonly property string label: root.glyph + (root.value !== "" ? " " + root.value : "")
+  // The button's text: the glyph and the reading on a horizontal bar. A
+  // vertical bar gives each widget a slot only as wide as the bar is thick,
+  // so there it is the glyph alone — which the shell then draws as an icon
+  // (WidgetButton's icon contract) — whatever `show` is set to.
+  readonly property string barText: root.vertical ? root.glyph : root.label
 
   function tick() {
     var nowS = Date.now() / 1000
@@ -370,7 +377,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.label
+    text: root.barText
     tooltipText: root.statusData && !root.stale ? Model.summary(root.statusData) : "Starlink — NO_DATA"
     horizontalMargin: 8.75
     onPressed: function(b) {
