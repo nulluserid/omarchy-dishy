@@ -69,6 +69,17 @@ Panel {
     font.pixelSize: Style.font.bodySmall
   }
 
+  // The controls' width: a button as the shell sizes it for the armed label,
+  // which every control is given.
+  Button {
+    id: confirmProbe
+    visible: false
+    text: "Confirm?"
+    fontSize: Style.font.bodySmall
+    fontFamily: root.fontFamily
+    bordered: true
+  }
+
   // hist.json: parsed only while open; null = unreadable, oversize or
   // malformed.
   // map is its obstruction map after Model.validMap (null when absent or
@@ -789,17 +800,34 @@ Panel {
               }
 
               Repeater {
+                // drops: the control takes the link down.
                 model: [
-                  { action: "stow", title: "Stow" },
-                  { action: "unstow", title: "Unstow" },
-                  { action: "reboot", title: "Reboot" }
+                  { action: "stow", title: "Stow", drops: true },
+                  { action: "unstow", title: "Unstow", drops: false },
+                  { action: "reboot", title: "Reboot", drops: true }
                 ]
 
-                ConfirmButton {
+                Button {
                   required property var modelData
-                  action: modelData.action
-                  title: modelData.title
-                  onFired: function(a) { root.runCtl(a) }
+                  readonly property bool armed: root.armedAction === modelData.action
+                  // Sized for the armed label, the longest one, so arming a
+                  // button moves nothing under the pointer.
+                  width: confirmProbe.implicitWidth
+                  text: armed ? "Confirm?" : modelData.title
+                  fontSize: Style.font.bodySmall
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  // Stow and Reboot drop the link, so they are urgent at
+                  // rest, as the shell marks a destructive choice; armed
+                  // is urgent whatever the control is.
+                  foreground: armed || modelData.drops ? Commons.Color.urgent : root.fg
+                  accent: armed ? Commons.Color.urgent : Commons.Color.accent
+                  active: armed
+                  onClicked: {
+                    if (root.ctlBusy) return
+                    if (!armed) root.armedAction = modelData.action
+                    else root.runCtl(modelData.action)
+                  }
                 }
               }
             }
@@ -991,42 +1019,6 @@ Panel {
       font.family: root.fontFamily
       font.pixelSize: kv.small ? Style.font.bodySmall : Style.font.body
       font.bold: kv.bold
-    }
-  }
-
-  component ConfirmButton: Rectangle {
-    id: cb
-    property string action: ""
-    property string title: ""
-    signal fired(string action)
-
-    readonly property bool armed: root.armedAction === action
-
-    implicitWidth: cbLabel.implicitWidth + Style.space(12)
-    implicitHeight: Style.space(26)
-    radius: Style.space(6)
-    color: armed ? Qt.rgba(Commons.Color.urgent.r, Commons.Color.urgent.g, Commons.Color.urgent.b, 0.18) : "transparent"
-    border.width: 1
-    border.color: armed ? Commons.Color.urgent : Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.35)
-
-    Text {
-      id: cbLabel
-      anchors.centerIn: parent
-      text: cb.armed ? "Confirm?" : cb.title
-      textFormat: Text.PlainText
-      color: cb.armed ? Commons.Color.urgent : root.fg
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-    }
-
-    MouseArea {
-      anchors.fill: parent
-      cursorShape: Qt.PointingHandCursor
-      onClicked: {
-        if (root.ctlBusy) return
-        if (!cb.armed) root.armedAction = cb.action
-        else cb.fired(cb.action)
-      }
     }
   }
 
