@@ -255,8 +255,10 @@ Panel {
     // The dashboard's own height, capped: the card ends where its content
     // does instead of holding a fixed height with an empty band under it.
     // Until the daemon answers, it is sized to the two waiting lines.
+    // The cap is the card's, the shell's 32 px of padding and border
+    // included: 512 leaves the dashboard 480.
     contentHeight: panel.fittedContentHeight(
-      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(480))
+      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(512))
 
     PanelKeyCatcher {
       id: keyCatcher
