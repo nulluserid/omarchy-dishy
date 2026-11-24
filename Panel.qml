@@ -26,6 +26,9 @@ Panel {
   // The house dim: every core panel darkens the foreground for labels. The
   // palette's muted is a blue on some themes, which turned every label blue.
   readonly property color dim: Qt.darker(root.fg, 1.4)
+  // The up-link series and its header value: the foreground at 55 %, beside
+  // the accent-coloured downlink. It was amber, which is the attention colour.
+  readonly property color upColor: Qt.rgba(root.fg.r, root.fg.g, root.fg.b, 0.55)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   // The daemon's state dir as the bar widget resolved it (it follows the
   // daemon: XDG_STATE_HOME, else ~/.local/state, then the runtime-dir symlink
@@ -487,14 +490,14 @@ Panel {
               }
             }
 
-            // Throughput: down (fill) + up (line), legend line under.
+            // Throughput: down (fill) + up (line), keyed by colour in the header.
             Column {
               width: (parent.width - parent.spacing) / 2
               spacing: Style.space(3)
 
               Item {
                 width: parent.width
-                height: Math.max(thrTitle.implicitHeight, thrValue.implicitHeight)
+                height: Math.max(thrTitle.implicitHeight, thrDown.implicitHeight, thrUp.implicitHeight)
 
                 PanelSectionHeader {
                   id: thrTitle
@@ -504,15 +507,29 @@ Panel {
                   anchors.left: parent.left
                 }
 
+                // The two series differ by colour alone, so each value is
+                // printed in its own series' colour. Siblings of the title,
+                // so each can sit on its baseline.
                 Text {
-                  id: thrValue
+                  id: thrUp
                   anchors.right: parent.right
                   anchors.baseline: thrTitle.baseline
-                  text: root.hasData && s.live
-                    ? "↓" + Model.fmtMbps(s.live.downMbps) + " ↑" + Model.fmtMbps(s.live.upMbps)
-                    : ""
                   textFormat: Text.PlainText
-                  color: root.fg
+                  text: root.hasData && s.live ? "↑" + Model.fmtMbps(s.live.upMbps) : ""
+                  color: root.upColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  font.bold: true
+                }
+
+                Text {
+                  id: thrDown
+                  anchors.right: thrUp.left
+                  anchors.rightMargin: Style.space(6)
+                  anchors.baseline: thrTitle.baseline
+                  textFormat: Text.PlainText
+                  text: root.hasData && s.live ? "↓" + Model.fmtMbps(s.live.downMbps) : ""
+                  color: Commons.Color.accent
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   font.bold: true
@@ -535,21 +552,10 @@ Panel {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.upMbps : [], width)
                   maxValue: Math.max(root.throughputMax, 100)
-                  lineColor: Model.WARN_HEX
+                  lineColor: root.upColor
                 }
               }
 
-              Text {
-                width: parent.width
-                text: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-                  ? "typ ↓ " + Model.fmtMbps(s.live.typicalDownMbps)
-                  : "↓ down (fill) · ↑ up (line)"
-                textFormat: Text.PlainText
-                elide: Text.ElideRight
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
             }
           }
 
@@ -561,9 +567,7 @@ Panel {
             GraphSection {
               width: root.hasPower ? (parent.width - parent.spacing) / 2 : parent.width
               title: "Today"
-              valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
-                ? Model.fmtMbps(s.live.typicalDownMbps)
-                : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
+              valueText: root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—"
               series: root.daySeries
               autoScale: true
               maxValue: 100
