@@ -112,21 +112,18 @@ Panel {
     } catch (e) {
       root.dayData = null
     }
+    var now = new Date()
+    var next = Model.dayAxis(root.dayData, now.getHours() * 60 + now.getMinutes())
+    if (!Model.sameSeries(root.daySeries, next)) root.daySeries = next
   }
 
-  // Today's typical-down series so far (minute-of-day order, null gaps).
-  readonly property var daySeries: {
-    if (!root.dayData || !root.dayData.minutes) return []
-    var now = new Date()
-    var cur = now.getHours() * 60 + now.getMinutes()
-    var m = root.dayData.minutes
-    var out = []
-    for (var i = 0; i <= cur && i < m.length; i++) {
-      var v = m[i] ? m[i].downTyp : null
-      out.push(v ? v : null)
-    }
-    return out
-  }
+  // Today's typical-down series on the day's fixed axis (Model.dayAxis): one
+  // entry per minute of the day, null for a minute without data and for every
+  // minute still to come, so "now" sits at its place in the day and the plot
+  // does not look cut off in the morning. It is replaced only when its
+  // content differs (Model.sameSeries): the Canvas repaints on a real change
+  // and not on every 2 s reload, whose parse yields a fresh, identical file.
+  property var daySeries: []
 
   // Today's peak typical, for the section value line.
   readonly property var dayPeak: {
@@ -191,16 +188,29 @@ Panel {
     dashScroll.contentY = Math.max(0, Math.min(max, dashScroll.contentY + dy * 80))
   }
 
-  // p50/p95 guide lines: lat5m when fresh, else derived from the series.
-  readonly property var latencyGuides: {
+  // p50/p95: lat5m when fresh, else derived from the series. They are drawn
+  // as dashed guides and named once, in the latency header, instead of over
+  // the plot's newest samples.
+  readonly property var latencyP: {
     var lat = s && s.lat5m ? s.lat5m : {}
     var series = h ? h.latencyMs : []
-    var p50 = lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50)
-    var p95 = lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
+    return {
+      p50: lat.p50 !== undefined && lat.p50 !== null ? lat.p50 : Model.percentile(series, 50),
+      p95: lat.p95 !== undefined && lat.p95 !== null ? lat.p95 : Model.percentile(series, 95)
+    }
+  }
+  readonly property var latencyGuides: {
     var g = []
-    if (p50 !== null) g.push({ value: p50, label: "p50 " + Math.round(p50), color: String(root.dim) })
-    if (p95 !== null) g.push({ value: p95, label: "p95 " + Math.round(p95), color: Model.WARN_HEX })
+    if (latencyP.p50 !== null) g.push({ value: latencyP.p50, color: String(root.dim) })
+    if (latencyP.p95 !== null) g.push({ value: latencyP.p95, color: Model.WARN_HEX })
     return g
+  }
+  // "p50 24 · p95 26 ms": only the guides there are, the unit once.
+  readonly property string latencyGuideText: {
+    var parts = []
+    if (latencyP.p50 !== null) parts.push("p50 " + Math.round(latencyP.p50))
+    if (latencyP.p95 !== null) parts.push("p95 " + Math.round(latencyP.p95))
+    return parts.length ? parts.join(" · ") + " ms" : ""
   }
 
   // One shared y-scale for down+up so the two series are comparable.
@@ -398,6 +408,10 @@ Panel {
           }
 
           // ---- Graph grid (two columns, 80s-readout dense) ----
+          // Each plot spans at least its unit's floor and auto-scales for
+          // peaks above it: 50 ms of latency; 100 Mbps of downlink, the order
+          // of a healthy Starlink link, so an idle one sits low instead of
+          // filling the plot; over the day 100 Mbps; and 60 W.
           Row {
             width: parent.width
             spacing: Style.space(10)
@@ -409,7 +423,7 @@ Panel {
 
               Item {
                 width: parent.width
-                height: Math.max(latTitle.implicitHeight, latValue.implicitHeight)
+                height: Math.max(latTitle.implicitHeight, latGuides.implicitHeight, latValue.implicitHeight)
 
                 PanelSectionHeader {
                   id: latTitle
@@ -417,6 +431,18 @@ Panel {
                   foreground: root.fg
                   fontFamily: root.fontFamily
                   anchors.left: parent.left
+                }
+
+                Text {
+                  id: latGuides
+                  anchors.left: latTitle.right
+                  anchors.leftMargin: Style.space(8)
+                  anchors.baseline: latTitle.baseline
+                  textFormat: Text.PlainText
+                  text: root.latencyGuideText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
                 }
 
                 Text {
@@ -438,6 +464,7 @@ Panel {
                 values: Model.decimate(h ? h.latencyMs : [], width)
                 guides: root.latencyGuides
                 autoScale: true
+                maxValue: 50
                 lineColor: Commons.Color.accent
               }
 
@@ -499,7 +526,7 @@ Panel {
                 Sparkline {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.downMbps : [], width)
-                  maxValue: root.throughputMax
+                  maxValue: Math.max(root.throughputMax, 100)
                   lineColor: Commons.Color.accent
                   area: true
                 }
@@ -507,7 +534,7 @@ Panel {
                 Sparkline {
                   anchors.fill: parent
                   values: Model.decimate(h ? h.upMbps : [], width)
-                  maxValue: root.throughputMax
+                  maxValue: Math.max(root.throughputMax, 100)
                   lineColor: Model.WARN_HEX
                 }
               }
@@ -539,6 +566,7 @@ Panel {
                 : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
               series: root.daySeries
               autoScale: true
+              maxValue: 100
               plotHeight: 38
             }
 
@@ -549,6 +577,7 @@ Panel {
               valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
               series: Model.decimate(h ? h.powerW : [], width)
               autoScale: true
+              maxValue: 60
               plotHeight: 38
             }
           }

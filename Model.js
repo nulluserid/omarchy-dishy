@@ -351,6 +351,38 @@ function sameMap(a, b) {
   return true
 }
 
+// Minutes in the day file's fixed axis (CONTRACT.md "day-YYYYMMDD.json").
+var DAY_MINUTES = 1440
+
+// A day file's typical-down series on a fixed 24-hour axis: one entry per
+// minute of the day in minute-of-day order — null for a minute without data
+// and for every minute after `now` (the minute of the day), which the daemon
+// has not written yet. So "now" sits at its place in the day and the plot
+// does not look cut off in the morning. The file's own layout does not
+// change: this reads it exactly as the growing plot did.
+function dayAxis(dayData, now) {
+  var out = []
+  var m = dayData && dayData.minutes ? dayData.minutes : []
+  var last = Math.min(Math.max(0, Math.floor(num(now, 0))), DAY_MINUTES - 1)
+  for (var i = 0; i < DAY_MINUTES; i++) {
+    var v = i <= last && i < m.length ? m[i] : null
+    out.push(v && v.downTyp ? v.downTyp : null)
+  }
+  return out
+}
+
+// True when two series draw the same line: equal length and element-wise
+// equal (a gap equals a gap). The day series is rebuilt on every reload, so
+// identity cannot answer this — only a series that changed replaces the last.
+function sameSeries(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 // "City, Region, CC" from the daemon's egress lookup; null when unknown.
 function geoPlace(geo) {
   var parts = geo ? [geo.city, geo.region, geo.country] : []
