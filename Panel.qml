@@ -205,7 +205,11 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(720))
-    contentHeight: panel.fittedContentHeight(Style.space(480))
+    // The dashboard's own height, capped: the card ends where its content
+    // does instead of holding a fixed height with an empty band under it.
+    // Until the daemon answers, it is sized to the two waiting lines.
+    contentHeight: panel.fittedContentHeight(
+      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(480))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -217,6 +221,7 @@ Panel {
 
       // Waiting for the daemon.
       Column {
+        id: waitingColumn
         anchors.centerIn: parent
         visible: !root.hasData
         spacing: Style.space(8)
@@ -718,8 +723,6 @@ Panel {
           }
 
           // ---- Usage / availability grid ----
-          PanelSeparator { foreground: root.fg }
-
           Row {
             width: parent.width
             spacing: Style.space(12)
@@ -808,16 +811,6 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
-          }
-
-          Text {
-            width: parent.width
-            horizontalAlignment: Text.AlignHCenter
-            text: "Esc  close   ·   ↑ ↓  scroll"
-            textFormat: Text.PlainText
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.bodySmall
           }
         }
       }
