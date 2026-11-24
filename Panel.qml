@@ -382,8 +382,10 @@ Panel {
                         verticalAlignment: Text.AlignVCenter
                         textFormat: Text.PlainText
                         text: modelData
-                        // The last resort, for a notice longer than the row.
-                        elide: Text.ElideRight
+                        // No elide: the chip is as wide as this label's
+                        // measured advance, so one too long for the row is
+                        // never shortened: it runs over the title, to the
+                        // card's edge and no further.
                         color: Model.WARN_HEX
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
