@@ -1,18 +1,23 @@
 import QtQuick
 import qs.Commons
+// The palette is reached as Commons.Color: Qt 6.12 ships its own `Color`
+// type, which the bare name resolves to.
+import qs.Commons as Commons
 
 // Line graph over a series where null entries are gaps (dropped samples).
-// Optional dashed, labeled guide lines and an area fill under the line.
+// Optional dashed guide lines and an area fill under the line. The guides
+// are not labelled in the plot: a label would sit on the newest samples and
+// in the canvas's default font, so the panel prints p50/p95 in its header.
 Canvas {
   id: root
 
   property var values: []
   property real maxValue: 100
   property bool autoScale: false
-  property color lineColor: Color.accent
+  property color lineColor: Commons.Color.accent
   property bool area: false
   property color fillColor: Qt.rgba(lineColor.r, lineColor.g, lineColor.b, 0.16)
-  property var guides: []  // [{ value, label, color }]
+  property var guides: []  // [{ value, color }]
   property real lineW: 1.5
 
   readonly property real effectiveMax: {
@@ -96,10 +101,6 @@ Canvas {
       ctx.lineTo(width, gy)
       ctx.stroke()
       ctx.setLineDash([])
-      if (guide.label) {
-        ctx.fillStyle = guide.color
-        ctx.fillText(guide.label, width - ctx.measureText(guide.label).width - 2, Math.max(9, gy - 3))
-      }
     }
   }
 

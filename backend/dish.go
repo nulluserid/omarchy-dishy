@@ -55,6 +55,29 @@ func (d *daemon) partitionDir(id string) string {
 	return filepath.Join(d.cfg.dir, dishesDirName, dishDirName(id))
 }
 
+// publishedDir is the name of the partition actually being written, as
+// status.json publishes it (dish.dir): the adopted dish's, never an id that
+// is merely pending in the identity debounce. Empty while no identity is
+// known (the state root is written then), which omits the field.
+func (d *daemon) publishedDir() string {
+	if d.dishID == "" {
+		return ""
+	}
+	return dishDirName(d.dishID)
+}
+
+// securePartition tightens the dishes/ root and the current dish's partition
+// to 0700 — once, when a partition is created, adopted or switched to, never
+// per tick. Nothing else inside is touched: historical file and directory
+// modes stay exactly as they are (a recorded decision).
+func (d *daemon) securePartition() {
+	for _, p := range []string{filepath.Join(d.cfg.dir, dishesDirName), d.dishDir} {
+		if err := os.Chmod(p, 0o700); err != nil {
+			d.vlog("chmod %s: %v", p, err)
+		}
+	}
+}
+
 // statDir is where THIS dish's accumulated state files go: the dish's
 // partition once an identity is known, the state root before that (startup
 // fail ticks with no evidence yet).
@@ -74,15 +97,19 @@ func (d *daemon) adoptLastDish(now time.Time) {
 	if !ok || dc.LastDish == "" {
 		return
 	}
-	p := d.partitionDir(dc.LastDish)
+	// config.json is the daemon's own file, but this keeps the invariant
+	// absolute: d.dishID only ever holds a clipped id, whatever it says.
+	id := clip(dc.LastDish, maxDishStrRunes)
+	p := d.partitionDir(id)
 	if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
 		return
 	}
-	d.dishID = dc.LastDish
+	d.dishID = id
 	d.dishDir = p
+	d.securePartition()
 	d.loadDaily()
 	d.initDay(now)
-	d.vlog("dish: adopted partition %s (%s)", dishDirName(dc.LastDish), dc.LastDish)
+	d.vlog("dish: adopted partition %s (%s)", dishDirName(id), id)
 }
 
 // switchDish moves all dish-derived accumulated state to the partition of
@@ -147,6 +174,7 @@ func (d *daemon) switchDish(now time.Time, id, hw string) {
 	if err := os.MkdirAll(d.dishDir, 0o700); err != nil {
 		d.vlog("partition %s: %v", dishDirName(id), err)
 	}
+	d.securePartition()
 	d.pendingID, d.pendingIDTicks = "", 0
 	d.lastOutageAnnounce = 0
 	d.daily = dailyFile{} // replaced by the partition's counters below
@@ -257,11 +285,14 @@ func (d *daemon) evictPartitions(now time.Time) {
 // partitionLastActivity is the newest connection evidence in a dish
 // partition: daily.json's lastSeen stamp (good-tick only), the day after
 // the newest day file's date, or — for pre-stamp files — daily.json's
-// mtime, whichever is later.
+// mtime, whichever is later. daily.json is read capped, like every load
+// (loadDaily; CONTRACT.md "Security hardening"): a file over the cap was
+// not written by this daemon, so its stamp counts for nothing and it takes
+// the unreadable-file fallback, the mtime.
 func partitionLastActivity(dir string) time.Time {
 	var last time.Time
 	haveStamp := false
-	if b, err := os.ReadFile(filepath.Join(dir, "daily.json")); err == nil {
+	if b, err := readCapped(filepath.Join(dir, "daily.json"), maxDailyBytes); err == nil {
 		var df dailyFile
 		if json.Unmarshal(b, &df) == nil && df.LastSeen > 0 {
 			last = time.Unix(df.LastSeen, 0)
@@ -269,8 +300,8 @@ func partitionLastActivity(dir string) time.Time {
 		}
 	}
 	if !haveStamp {
-		// Pre-stamp file or unreadable daily.json: mtime is the best
-		// remaining signal (pre-1.5 partitions and drive-bys).
+		// Pre-stamp file, or an unreadable or oversize daily.json: mtime is
+		// the best remaining signal (pre-1.5 partitions and drive-bys).
 		if fi, err := os.Stat(filepath.Join(dir, "daily.json")); err == nil {
 			last = fi.ModTime()
 		}

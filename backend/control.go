@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,7 +62,9 @@ func runControl(cmd string, args []string) int {
 	}
 
 	if _, err := api.NewDeviceClient(conn).Handle(ctx, &req); err != nil {
-		fmt.Fprintf(os.Stderr, "starlinkd: %s failed: %v\n", cmd, err)
+		// The panel shows this line verbatim as the control's result, so the
+		// dish's status text gets the same boundary here as in status.json.
+		fmt.Fprintf(os.Stderr, "starlinkd: %s failed: %s\n", cmd, rpcErr(err))
 		return 1
 	}
 	return 0
@@ -133,9 +136,15 @@ func loadTargetConfig(dir string) (string, bool) {
 	return t, true
 }
 
-// loadDaemonConfig reads the full persisted configuration.
+// maxConfigBytes caps the config.json the daemon will load. A target is at
+// most 253 bytes and a dish id 64 runes, so anything larger was not written
+// by this daemon and reads as absent, exactly like a corrupt one.
+const maxConfigBytes = 4 << 10
+
+// loadDaemonConfig reads the full persisted configuration; missing, corrupt
+// or oversize reads as absent.
 func loadDaemonConfig(dir string) (daemonConfig, bool) {
-	b, err := os.ReadFile(filepath.Join(dir, configName))
+	b, err := readCapped(filepath.Join(dir, configName), maxConfigBytes)
 	if err != nil {
 		return daemonConfig{}, false
 	}
@@ -203,6 +212,10 @@ func (d *daemon) setTarget(target string) error {
 
 const ctrlSocketName = "starlinkd.sock"
 
+// controlAcceptRetry is the accept loop's pause after a transient Accept
+// failure, before it tries again.
+const controlAcceptRetry = 100 * time.Millisecond
+
 func controlSocketPath() string {
 	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
 		return filepath.Join(dir, ctrlSocketName)
@@ -242,10 +255,26 @@ func (d *daemon) startControl() error {
 	d.ctrlLn, d.ctrlPath = ln, path
 
 	go func() {
+		// Accept failures are logged once per distinct message for the life
+		// of the process: a daemon that is fd-starved flaps between one
+		// successful accept and the next failure, and logging per episode
+		// would flood the journal instead.
+		last := ""
 		for {
 			c, err := ln.Accept()
 			if err != nil {
-				return // listener closed at process exit
+				if errors.Is(err, net.ErrClosed) {
+					return // listener closed at process exit
+				}
+				// Any other failure is treated as transient: a burst that hits
+				// the descriptor limit (EMFILE/ENFILE) or an aborted client
+				// must not disable panel control for the life of the process.
+				if msg := err.Error(); msg != last {
+					d.vlog("control accept: %v (retrying)", err)
+					last = msg
+				}
+				time.Sleep(controlAcceptRetry)
+				continue
 			}
 			go serveControlConn(c, d.ctrlCh)
 		}
@@ -258,22 +287,31 @@ func serveControlConn(c net.Conn, ch chan<- string) {
 	defer c.Close()
 	c.SetDeadline(time.Now().Add(2 * time.Second))
 	// 512 covers every legal command ('set host ' + a 253-byte-cap target
-	// plus appended :9200). A full buffer means the line is oversize or
-	// unterminated: reject it rather than act on a truncated prefix that
-	// could normalize to a different valid target.
+	// plus appended :9200). A command is only what a newline terminates
+	// inside that buffer, however many writes it arrives in: a stream read
+	// can split it, and a peer that closes without the newline — or fills
+	// the buffer without one — is rejected rather than have its prefix acted
+	// on ("set host 1." normalizes to a different, valid target).
 	b := make([]byte, 512)
-	n, err := c.Read(b)
-	if n == len(b) {
+	var n int
+	for n < len(b) {
+		k, err := c.Read(b[n:])
+		n += k
+		if err != nil || bytes.IndexByte(b[:n], '\n') >= 0 {
+			break
+		}
+	}
+	end := bytes.IndexByte(b[:n], '\n')
+	if end < 0 {
 		_, _ = io.WriteString(c, "bad\n")
 		return
 	}
-	if err != nil && !errors.Is(err, io.EOF) {
-		return
-	}
-	cmd := strings.TrimSpace(string(b[:n]))
+	cmd := strings.TrimSpace(string(b[:end]))
 	forward := ""
 	switch {
-	case cmd == "open" || cmd == "close":
+	case cmd == "open" || cmd == "close" || cmd == "alive":
+		// `alive` is the widget's liveness heartbeat: same validation, same
+		// queue, same reply as the panel commands.
 		forward = cmd
 	case strings.HasPrefix(cmd, "set host "):
 		if _, err := normalizeTarget(strings.TrimPrefix(cmd, "set host ")); err != nil {
@@ -283,22 +321,37 @@ func serveControlConn(c net.Conn, ch chan<- string) {
 		forward = cmd
 	}
 	if forward != "" {
+		// "ok" promises the tick loop will see the command, so it may only
+		// follow an enqueue that actually happened. A full channel means the
+		// command is dropped, and the caller has to hear that instead.
+		reply := "busy\n"
 		select {
 		case ch <- forward:
+			reply = "ok\n"
 		default:
 		}
-		_, _ = io.WriteString(c, "ok\n")
+		_, _ = io.WriteString(c, reply)
 		return
 	}
 	_, _ = io.WriteString(c, "bad\n")
 }
 
 // runPanel is the client side of the control socket: `starlinkd panel
-// open|close`. Nonzero exit when the daemon is not listening (the QML caller
-// ignores errors; the dashboard still works at idle cadence).
+// open|close|alive`. Nonzero exit when the daemon is not listening (the QML
+// caller ignores errors for open/close; the dashboard still works at idle
+// cadence).
+//
+// `alive` is the widget's liveness heartbeat and, unlike open/close, waits
+// for the reply: exit 0 only on the daemon's "ok", so the widget can tell
+// "nobody is listening" from "heard". It is a panel mode on purpose. A
+// top-level verb of its own would not be fail-safe: on a binary older than
+// this one an unknown top-level verb is ignored and starts a full daemon
+// beside the real one, whereas `panel` has existed since v1.1 and exits 2
+// with its usage line on any mode it does not know — new QML against an old
+// binary starts nothing.
 func runPanel(args []string) int {
-	if len(args) != 1 || (args[0] != "open" && args[0] != "close") {
-		fmt.Fprintln(os.Stderr, "usage: starlinkd panel open|close")
+	if len(args) != 1 || (args[0] != "open" && args[0] != "close" && args[0] != "alive") {
+		fmt.Fprintln(os.Stderr, "usage: starlinkd panel open|close|alive")
 		return 2
 	}
 	path := controlSocketPath()
@@ -315,6 +368,15 @@ func runPanel(args []string) int {
 	c.SetDeadline(time.Now().Add(2 * time.Second))
 	if _, err := io.WriteString(c, args[0]+"\n"); err != nil {
 		fmt.Fprintf(osStderr, "starlinkd: control socket: %v\n", err)
+		return 1
+	}
+	if args[0] != "alive" {
+		return 0
+	}
+	reply := make([]byte, 16)
+	n, err := c.Read(reply)
+	if got := strings.TrimSpace(string(reply[:n])); err != nil || !strings.HasPrefix(got, "ok") {
+		fmt.Fprintf(osStderr, "starlinkd: control socket: not acknowledged (%q)\n", got)
 		return 1
 	}
 	return 0
@@ -369,8 +431,28 @@ func (d *daemon) panelActive(now time.Time) bool {
 	return now.Before(d.panelUntil)
 }
 
-// applyControl handles one control-socket command ("open"/"close"/"set host …").
+// touchIdle pushes the idle-exit deadline one period past now. Without
+// -idle-exit it does nothing.
+func (d *daemon) touchIdle(now time.Time) {
+	if d.cfg.idleExit > 0 {
+		d.idleExitAt = now.Add(d.cfg.idleExit)
+	}
+}
+
+// closeControl stops the panel listener and removes its socket for a clean
+// exit (the next start would remove a stale one anyway). Failures are ignored.
+func (d *daemon) closeControl() {
+	if d.ctrlLn != nil {
+		d.ctrlLn.Close()
+		os.Remove(d.ctrlPath)
+	}
+}
+
+// applyControl handles one control-socket command ("open"/"close"/"alive"/
+// "set host …"). Each one is also a liveness signal: under -idle-exit it
+// pushes the idle deadline out by a full period.
 func (d *daemon) applyControl(cmd string, now time.Time) {
+	d.touchIdle(now)
 	switch {
 	case cmd == "open":
 		d.panelUntil = now.Add(panelLease)
@@ -379,6 +461,9 @@ func (d *daemon) applyControl(cmd string, now time.Time) {
 	case cmd == "close":
 		d.panelUntil = time.Time{}
 		d.vlog("panel close")
+	case cmd == "alive":
+		// The heartbeat carries no state of its own; the refreshed deadline
+		// above is all it does.
 	case strings.HasPrefix(cmd, "set host "):
 		if err := d.setTarget(strings.TrimPrefix(cmd, "set host ")); err != nil {
 			d.vlog("set host: %v", err)
@@ -394,4 +479,23 @@ func (d *daemon) nextDelay() time.Duration {
 		return d.cfg.interval
 	}
 	return d.cfg.idleInterval
+}
+
+// nextWake is how long the main loop may sleep: until the next tick, or only
+// until the idle deadline when that comes first — a daemon nobody polls any
+// more must not oversleep its own exit.
+func (d *daemon) nextWake() time.Duration {
+	delay := d.nextDelay()
+	if d.cfg.idleExit > 0 {
+		if until := time.Until(d.idleExitAt); until < delay {
+			delay = until
+		}
+	}
+	return max(delay, 0)
+}
+
+// idleExpired reports that the -idle-exit deadline has passed with no
+// control-socket command since.
+func (d *daemon) idleExpired(now time.Time) bool {
+	return d.cfg.idleExit > 0 && !now.Before(d.idleExitAt)
 }

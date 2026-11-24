@@ -3,10 +3,44 @@
 // Pure parsing and formatting helpers for the starlinkd status/hist files
 // (backend/CONTRACT.md). Everything degrades to placeholders, never throws.
 
-// Status colors that have no omarchy theme token (palette only defines
-// accent/urgent/muted). Red/gray map to Color.urgent/Color.muted in QML.
-var OK_HEX = "#7cb342"
-var WARN_HEX = "#ffa000"
+// Status colors that have no omarchy theme token (the palette defines only
+// foreground/accent/urgent/muted, so there is nothing to derive a green or
+// an amber from). Two calm values that sit with pastel palettes: a soft
+// green, and a soft amber that means attention and nothing else. Red and
+// gray map to the palette in QML (qualified there: Qt 6.12's own `Color`
+// takes the bare name).
+var OK_HEX = "#8fbc8f"
+var WARN_HEX = "#e0b850"
+
+// Ceilings, in chars, for the state files the shell parses on the GUI
+// thread: each is the daemon's contract size with generous headroom
+// (backend/CONTRACT.md). They sit above the conforming maximum of each
+// file — refusing one the daemon may legally write would blank the
+// dashboard, not bound it. A file past its ceiling is not one our daemon
+// wrote — parseBounded refuses it before JSON.parse. Defense in depth
+// behind the daemon, which caps what it writes from the unauthenticated
+// dish endpoint.
+var MAX_STATUS_CHARS = 65536   // status.json, ~1.5KB, parsed on every tick
+var MAX_HIST_CHARS = 786432    // hist.json, ~60KB on a real dish, ≈ 506KB at the conforming max
+var MAX_DAY_CHARS = 262144     // day-YYYYMMDD.json, 1440 minute records ≈ 110KB
+var MAX_CONFIG_CHARS = 4096    // config.json, a target and a dish id
+
+// The obstruction map's bound (hist.json `map`): at most MAX_MAP_DIM x
+// MAX_MAP_DIM cells, which is what keeps hist.json under MAX_HIST_CHARS.
+// Consumers refuse to draw anything beyond it.
+var MAX_MAP_DIM = 256
+
+// Alerts from status.json the shell will ever look at. The daemon emits at
+// most 19 (one per dish alert flag); the cap keeps every loop over them —
+// tooltip, bar level, the panel's chips — from scaling with file content.
+var MAX_ALERTS = 64
+
+// Alert labels the panel's row and the bar tooltip name before the rest fold
+// into one "+N more".
+var MAX_ROW_LABELS = 3
+
+// The satellite glyph the bar widget and the panel's header share.
+var GLYPH = "\udb86\udc80"  // nf-md-satellite_uplink
 
 function parse(text) {
   try {
@@ -15,6 +49,15 @@ function parse(text) {
   } catch (e) {
     return null
   }
+}
+
+// parse() for a daemon-written file, refused as unreadable (null) when the
+// text runs past maxChars — one of the MAX_*_CHARS ceilings. The length
+// check runs before JSON.parse: the shell reads these files on the GUI
+// thread (status.json on every tick), so a file the daemon could not have
+// written is never parsed there.
+function parseBounded(text, maxChars) {
+  return String(text).length > maxChars ? null : parse(text)
 }
 
 function num(v, fallback) {
@@ -39,12 +82,21 @@ function isOffNetwork(status) {
   return !!link && link.onStarlink === false
 }
 
-// Every alert the dish currently reports, as labels — the full set, shown in
-// the tooltip so nothing the dish knows stays hidden from the user.
+// status.alerts, capped at its first MAX_ALERTS entries. Not an array reads
+// as none.
+function alertList(status) {
+  var alerts = status ? status.alerts : null
+  if (!Array.isArray(alerts)) return []
+  return alerts.length > MAX_ALERTS ? alerts.slice(0, MAX_ALERTS) : alerts
+}
+
+// Every alert the dish currently reports, as labels — in the daemon's order,
+// its most severe first. The panel's row and the tooltip name the leading
+// ones (fitChips, summary) and count the rest.
 function allAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     out.push(a.label ? String(a.label) : titleCase(id))
@@ -57,14 +109,53 @@ function allAlertLabels(status) {
 // not turn the bar amber.
 function actionAlertLabels(status) {
   var out = []
-  var alerts = status && status.alerts
-  if (alerts) for (var i = 0; i < alerts.length; i++) {
+  var alerts = alertList(status)
+  for (var i = 0; i < alerts.length; i++) {
     var a = alerts[i] || {}
     var id = String(a.id || "")
     if (id === "is_heating" || id === "is_power_save_idle") continue
     out.push(a.label ? String(a.label) : titleCase(id))
   }
   return out
+}
+
+// The panel's alert row as one line that never wraps: the first alert labels,
+// "+N more" for the rest, then the update notice, taking alert labels only
+// while everything fits in width. measure(text) gives a label's width in the
+// chip's font, gap the space between chips and pad the space on each side of
+// a label. At most MAX_ROW_LABELS labels are named however wide the row, and
+// an alert never pushes the notice out. Returns the chip texts in display
+// order — nothing when there is nothing to show. A notice too long for the
+// row is returned anyway: the caller's elide is the last resort.
+function fitChips(labels, updateText, measure, width, gap, pad) {
+  var list = Array.isArray(labels) ? labels : []
+  var n = list.length
+  var notice = updateText ? [String(updateText)] : []
+  var take = Math.min(n, MAX_ROW_LABELS)
+  for (;;) {
+    var chips = list.slice(0, take)
+    if (n > take) chips.push("+" + (n - take) + " more")
+    chips = chips.concat(notice)
+    var w = gap * Math.max(0, chips.length - 1)
+    for (var i = 0; i < chips.length; i++) w += measure(chips[i]) + pad * 2
+    if (w <= width || take === 0) return chips
+    take -= 1
+  }
+}
+
+// The one notice a software update or a disablement state raises, worded the
+// same on the panel's alert row and in the bar tooltip.
+function updateNotice(status) {
+  if (!status) return ""
+  var u = status.update || {}
+  if (u.state === "REBOOT_REQUIRED") return "Update — reboot required"
+  if (u.state === "FETCHING" || u.state === "WRITING")
+    return "Update — " + fmtPct(u.progressPct * 100, 0)
+  if (u.state === "FAULTED") return "Update — faulted"
+  var det = String(status.stateDetail || "")
+  if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
+    return titleCase(det)
+  return ""
 }
 
 // good = ONLINE with no attention-worthy alert, warn = SEARCHING/BOOTING or
@@ -127,6 +218,30 @@ function fmtPct(v, decimals) {
   return n === null ? "—" : n.toFixed(decimals === undefined ? 1 : decimals) + "%"
 }
 
+// The panel header's status line as segments, in order: state, uptime,
+// satellite count, interface speed. A segment the dish gave no reading for
+// is left out together with its separator. The daemon publishes proto3
+// defaults for whatever the dish did not report — an uptime of 0, which its
+// own BOOTING test reads the same way; an interface speed of 0; and on
+// firmware 2026.11.09 no GPS fields at all, only `valid: false, sats: 0` —
+// and those would otherwise print as a permanent "0s" or dash. Join with the
+// separator of your choice; [] when there is no status.
+function headerSegments(status) {
+  var out = []
+  if (!status) return out
+  var st = titleCase(status.state)
+  if (st) out.push(st)
+  var dish = status.dish
+  var up = dish ? num(dish.uptimeS) : null
+  if (up !== null && up > 0) out.push("up " + humanDur(up))
+  var gps = status.gps
+  var sats = gps && gps.valid ? num(gps.sats) : null
+  if (sats !== null && sats > 0) out.push("GPS " + sats + " sats")
+  var eth = dish ? num(dish.ethMbps) : null
+  if (eth !== null && eth > 0) out.push("eth " + fmtMbps(eth))
+  return out
+}
+
 // Nearest-rank percentile over non-null entries; null when no data.
 function percentile(values, p) {
   var vals = []
@@ -160,6 +275,115 @@ function decimate(values, buckets) {
   return out
 }
 
+// hist.json after parseBounded, or null when its shape is off: n an integer
+// in 1..900 (the daemon's ring is fixed at 900; CONTRACT.md: all five series
+// have exactly n entries), each of the five series an array of exactly n
+// entries that are null or finite numbers, intervalS a finite number > 0,
+// ts a finite number, and outages — absent or null when there are none —
+// at most 20 objects (the daemon emits the newest 20) whose start and durS,
+// when present, are finite numbers. The panel walks these on every 2 s
+// reload, so they must scale with the ring and the daemon's cap, never with
+// the file: a tampered hist.json degrades exactly like an unreadable one.
+function validHist(h) {
+  if (!h || typeof h !== "object") return null
+  var n = h.n
+  if (typeof n !== "number" || !isFinite(n) || Math.floor(n) !== n) return null
+  if (n < 1 || n > 900) return null
+  if (typeof h.intervalS !== "number" || !isFinite(h.intervalS) || h.intervalS <= 0) return null
+  if (typeof h.ts !== "number" || !isFinite(h.ts)) return null
+  var names = ["latencyMs", "downMbps", "upMbps", "powerW", "dropRate"]
+  for (var i = 0; i < names.length; i++) {
+    var series = h[names[i]]
+    if (!Array.isArray(series) || series.length !== n) return null
+    for (var j = 0; j < series.length; j++) {
+      var v = series[j]
+      if (v !== null && (typeof v !== "number" || !isFinite(v))) return null
+    }
+  }
+  var outages = h.outages
+  if (outages !== undefined && outages !== null) {
+    if (!Array.isArray(outages) || outages.length > 20) return null
+    for (var k = 0; k < outages.length; k++) {
+      var o = outages[k]
+      if (!o || typeof o !== "object" || Array.isArray(o)) return null
+      if (o.start !== undefined && (typeof o.start !== "number" || !isFinite(o.start))) return null
+      if (o.durS !== undefined && (typeof o.durS !== "number" || !isFinite(o.durS))) return null
+    }
+  }
+  return h
+}
+
+// hist.json `map` as ObsMap draws it — {rows, cols, maxThetaDeg, snr} with
+// rows/cols integers in 1..MAX_MAP_DIM and snr exactly rows*cols finite
+// values in [-1, 1] — or null. maxThetaDeg is the map's own finite number,
+// 90 when missing or invalid. Never throws, so no hostile shape reaches the
+// Canvas loop.
+function validMap(m) {
+  if (!m || typeof m !== "object") return null
+  var rows = m.rows
+  var cols = m.cols
+  // Integers only (JSON 123.0 is 123; 123.5, strings and null are not dims).
+  if (typeof rows !== "number" || !isFinite(rows) || Math.floor(rows) !== rows) return null
+  if (typeof cols !== "number" || !isFinite(cols) || Math.floor(cols) !== cols) return null
+  if (rows < 1 || rows > MAX_MAP_DIM || cols < 1 || cols > MAX_MAP_DIM) return null
+  var snr = m.snr
+  if (!Array.isArray(snr) || snr.length !== rows * cols) return null
+  for (var i = 0; i < snr.length; i++) {
+    var v = snr[i]
+    if (typeof v !== "number" || !isFinite(v) || v < -1 || v > 1) return null
+  }
+  var theta = m.maxThetaDeg
+  if (typeof theta !== "number" || !isFinite(theta)) theta = 90
+  return { rows: rows, cols: cols, maxThetaDeg: theta, snr: snr }
+}
+
+// True when two validMap() results draw the same picture: both null, or
+// equal rows/cols/maxThetaDeg and an element-wise equal snr. Every hist.json
+// reload parses a fresh array, so identity cannot answer this.
+function sameMap(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.rows !== b.rows || a.cols !== b.cols || a.maxThetaDeg !== b.maxThetaDeg) return false
+  var x = a.snr
+  var y = b.snr
+  if (!x || !y || x.length !== y.length) return false
+  for (var i = 0; i < x.length; i++) {
+    if (x[i] !== y[i]) return false
+  }
+  return true
+}
+
+// Minutes in the day file's fixed axis (CONTRACT.md "day-YYYYMMDD.json").
+var DAY_MINUTES = 1440
+
+// A day file's typical-down series on a fixed 24-hour axis: one entry per
+// minute of the day in minute-of-day order — null for a minute without data
+// and for every minute after `now` (the minute of the day), which the daemon
+// has not written yet. So "now" sits at its place in the day and the plot
+// does not look cut off in the morning. The file's own layout does not
+// change: this reads it exactly as the growing plot did.
+function dayAxis(dayData, now) {
+  var out = []
+  var m = dayData && dayData.minutes ? dayData.minutes : []
+  var last = Math.min(Math.max(0, Math.floor(num(now, 0))), DAY_MINUTES - 1)
+  for (var i = 0; i < DAY_MINUTES; i++) {
+    var v = i <= last && i < m.length ? m[i] : null
+    out.push(v && v.downTyp ? v.downTyp : null)
+  }
+  return out
+}
+
+// True when two series draw the same line: equal length and element-wise
+// equal (a gap equals a gap). The day series is rebuilt on every reload, so
+// identity cannot answer this — only a series that changed replaces the last.
+function sameSeries(a, b) {
+  if (!a || !b) return !a && !b
+  if (a.length !== b.length) return false
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
 // "City, Region, CC" from the daemon's egress lookup; null when unknown.
 function geoPlace(geo) {
   var parts = geo ? [geo.city, geo.region, geo.country] : []
@@ -169,39 +393,106 @@ function geoPlace(geo) {
   return out.length ? out.join(", ") : null
 }
 
-// Dish partition directory for a dish id — mirror of starlinkd's
-// dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only (anything else
-// becomes "-"), capped at 64 chars, "."/".."/"" mapped to "unknown" so a
-// hostile id cannot escape the dishes/ directory.
+// Fallback partition directory for a dish id — for status.json without
+// `dish.dir`, i.e. older daemons (see dishDir). A re-implementation of
+// starlinkd's dishDirName (backend/dish.go): lowercase, [a-z0-9._-] only
+// (anything else becomes "-"), capped at 64 chars, "."/".."/"" mapped to
+// "unknown" so a hostile id cannot escape the dishes/ directory. It counts
+// UTF-16 units where Go counts runes, so a non-ASCII id can name a
+// partition the daemon never wrote — which is why the daemon's own name is
+// preferred.
 function dishDirName(id) {
   var s = String(id || "").toLowerCase().replace(/[^a-z0-9._-]/g, "-").substring(0, 64)
   if (s === "" || s === "." || s === "..") return "unknown"
   return s
 }
 
-// One-line bar tooltip summary: state + live numbers + every active alert
-// and the software-update state, so a glance at the tooltip never misses
-// what the dish is telling us.
+// Partition directory of the dish a status.json describes (CONTRACT.md v4:
+// dishes/<dir>/ under the state dir); "" when no dish is known. The
+// daemon's own `dish.dir` is used when it is a sane name: it is the
+// partition the daemon is ACTUALLY writing, which during an identity switch
+// is the current dish's, not the pending id's. Older daemons do not publish
+// it, and only then does the sanitized id stand in (dishDirName).
+function dishDir(status) {
+  var dish = status && status.dish ? status.dish : null
+  var dir = dish ? dish.dir : null
+  var id = dish ? String(dish.id || "") : ""
+  var fallback = id !== "" ? dishDirName(id) : ""
+  if (typeof dir !== "string" || !/^[a-z0-9._-]{1,64}$/.test(dir)) return fallback
+  return dir === "." || dir === ".." ? fallback : dir
+}
+
+// The daemon's state dir — mirror of its XDG_STATE_HOME handling: a set
+// XDG_STATE_HOME wins, else ~/.local/state under the home dir.
+function stateDirFor(xdgStateHome, home) {
+  return (xdgStateHome || home + "/.local/state") + "/starlinkd"
+}
+
+// Where the daemon publishes its real state dir as a symlink at start —
+// absent until it has run this session, and nowhere to publish when there is
+// no runtime dir: "" then.
+function linkedStateDirFor(xdgRuntimeDir) {
+  return xdgRuntimeDir ? xdgRuntimeDir + "/starlinkd" : ""
+}
+
+// The two sources the daemon's state can be read from: the runtime symlink
+// above, and the XDG_STATE_HOME mirror (stateDirFor).
+var SOURCE_RUNTIME = "runtime"
+var SOURCE_MIRROR = "mirror"
+
+// The source to start on: the daemon's own dir whenever it has published one
+// (hasRuntimeStatus: its status.json is there) — fresh or not, that is where
+// its config.json lives — else the mirror. The ticks take freshness from
+// there.
+function startSource(hasRuntimeStatus) {
+  return hasRuntimeStatus ? SOURCE_RUNTIME : SOURCE_MIRROR
+}
+
+// One tick's choice of source, as a pure decision over an injected reader.
+// read(source) returns the status parsed from that source — null when
+// missing — as the file is NOW; a reader that throws reads as missing. The
+// current source is always read. Only when its status is missing or stale is
+// the other one read, once, and taken only when it is fresh: that read is
+// then the new source's first, so its data shows in this same tick rather
+// than one later, with no third read. When neither is fresh the widget stays
+// where it is, on the stale styling it already has. With hasRuntime false
+// there is no other source to fall over to. Returns { source, status,
+// switched, reads }.
+function pickSource(current, read, nowS, hasRuntime) {
+  var status = null
+  try { status = read(current) } catch (e) { status = null }
+  var result = { source: current, status: status, switched: false, reads: 1 }
+  if (!hasRuntime || !isStale(status, nowS)) return result
+  var other = current === SOURCE_RUNTIME ? SOURCE_MIRROR : SOURCE_RUNTIME
+  var otherStatus = null
+  try { otherStatus = read(other) } catch (e) { otherStatus = null }
+  result.reads = 2
+  if (!isStale(otherStatus, nowS)) {
+    result.source = other
+    result.status = otherStatus
+    result.switched = true
+  }
+  return result
+}
+
+// One-line bar tooltip: the state first, then what asks for attention — up
+// to MAX_ROW_LABELS alerts, "+N more" for the rest, and the update notice —
+// and only then the live numbers, so trouble is read before the line runs
+// long. One line without wrapping: the bar draws it as a single Text.
 function summary(status) {
   if (!status) return "Starlink — waiting for starlinkd"
   var st = String(status.state || "NO_DATA")
   if (st === "NO_DATA" || st === "") return "Starlink — waiting for starlinkd"
   var live = status.live || {}
   var parts = [titleCase(st)]
+  var alerts = allAlertLabels(status)
+  for (var i = 0; i < alerts.length && i < MAX_ROW_LABELS; i++) parts.push("⚠ " + alerts[i])
+  if (alerts.length > MAX_ROW_LABELS) parts.push("⚠ +" + (alerts.length - MAX_ROW_LABELS) + " more")
+  var notice = updateNotice(status)
+  if (notice !== "") parts.push(notice)
   if (live.latencyMs !== null && live.latencyMs !== undefined) parts.push(fmtMs(live.latencyMs))
   if (live.downMbps !== null && live.downMbps !== undefined)
     parts.push("↓" + fmtMbps(live.downMbps) + " ↑" + fmtMbps(live.upMbps))
-  if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
-    parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
   if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
-  var alerts = allAlertLabels(status)
-  for (var i = 0; i < alerts.length; i++) parts.push("⚠ " + alerts[i])
-  var det = String(status.stateDetail || "")
-  if (det !== "" && det.indexOf("REBOOT") < 0) parts.push(titleCase(det))
-  var u = status.update || {}
-  if (u.state === "REBOOT_REQUIRED") parts.push("update: reboot required")
-  else if (u.state === "FETCHING" || u.state === "WRITING")
-    parts.push("update: " + fmtPct(u.progressPct * 100, 0))
-  else if (u.state === "FAULTED") parts.push("update: faulted")
   return parts.join("  ·  ")
 }

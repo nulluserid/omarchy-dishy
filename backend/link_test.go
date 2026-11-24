@@ -39,6 +39,12 @@ func TestFetchGeoHTTPBoundary(t *testing.T) {
 		{"invalid", 200, `{`, false},
 		{"redirect", 302, "", false},
 		{"error", 503, `{}`, false},
+		// The dial is IPv4; the answer has to be too. None of these is an
+		// IPv4 address, and each used to be published as the machine's.
+		{"ipv6 address", 200, `{"ip":"2001:db8::1","asn":"AS14593","asn_org":"Starlink"}`, false},
+		{"ipv4-mapped ipv6 address", 200, `{"ip":"::ffff:203.0.113.1","asn":"AS14593"}`, false},
+		{"malformed address", 200, `{"ip":"` + strings.Repeat("1", 300) + `","asn":"AS14593"}`, false},
+		{"no address", 200, `{"asn":"AS14593","asn_org":"Starlink"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,8 +69,34 @@ func TestFetchGeoHTTPBoundary(t *testing.T) {
 				if d.geo != before {
 					t.Fatal("failed lookup replaced last good geo")
 				}
+				if d.lastGeoFailUnix == 0 {
+					t.Fatal("failed lookup did not anchor the failure backoff")
+				}
 			}
 		})
+	}
+	// The provider's strings are the provider's to size, and each lands in
+	// every status.json until the next lookup: oversized, control-laden or
+	// bidi-spoofed values are clipped at the boundary, never copied whole.
+	// The leading ESC / newline / bidi overrides are dropped before the cap
+	// counts, so the kept text is the full cap of clean runes. (The address
+	// is the one field that is validated instead — see the table above.)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ip":"203.0.113.7","city":"\u001b\u202e` + strings.Repeat("c", 300) +
+			`","region_name":"` + strings.Repeat("r", 300) + `","country_iso":"` + strings.Repeat("U", 40) +
+			`","asn":"` + strings.Repeat("A", 64) + `","asn_org":"\n\u2066` + strings.Repeat("o", 300) + `"}`))
+	}))
+	defer srv.Close()
+	if g, err := fetchGeoURL(t0, srv.URL); err != nil || g != (geoInfo{
+		Ts:      t0.Unix(),
+		IP:      "203.0.113.7",
+		City:    strings.Repeat("c", maxGeoTextRunes),
+		Region:  strings.Repeat("r", maxGeoTextRunes),
+		Country: strings.Repeat("U", maxGeoCountryRunes),
+		ASN:     strings.Repeat("A", maxGeoASNRunes),
+		Org:     strings.Repeat("o", maxGeoTextRunes),
+	}) {
+		t.Fatalf("oversize geo = %+v, %v", g, err)
 	}
 	if redirected.Load() {
 		t.Fatal("redirect destination was contacted")
@@ -385,6 +417,32 @@ func TestUpdateLinkEgressEvidence(t *testing.T) {
 	if d.link.Reason != "grace" {
 		t.Fatalf("stale geo reason = %q, want grace", d.link.Reason)
 	}
+
+	// Lookup cadence (maybeFetchGeo): the transition clock applies only while
+	// classifying. A settled off-network machine — a fresh answer naming
+	// another carrier — is a finished classification and runs on the settled
+	// clock: no lookup at transition age. Keying it on the marker instead
+	// (onStarlink false) asked every 60 s for as long as the machine was away.
+	d.cfg.geoInterval, d.cfg.geoTransitionInterval = 5*time.Minute, time.Minute
+	d.geo = geoInfo{Ts: t0.Unix() - 60, IsStarlink: false, ASN: "AS3320", Org: "Deutsche Telekom"}
+	d.link = linkInfo{OnStarlink: false, Reason: "egress-other", Since: t0.Unix() - 3600}
+	d.maybeFetchGeo(t0, false)
+	if d.geoFetching {
+		t.Fatal("settled off-network answer re-queried on the transition clock, want the settled clock")
+	}
+
+	// Failure backoff: with no answer at all the clock is the transition one,
+	// but a lookup that failed less than geoInterval ago holds it — an
+	// offline machine was otherwise asked on every tick.
+	d.geo = geoInfo{}
+	d.lastGeoFailUnix = t0.Unix() - 4*60
+	d.maybeFetchGeo(t0, false)
+	if d.geoFetching {
+		t.Fatal("lookup started inside the failure backoff")
+	}
+	// Only the negative side is pinned: a started lookup is a real request
+	// leaving the process, so the due cases are covered by the daemon's
+	// verbose log, not here.
 }
 
 func TestApplyGeoDoesNotStampDish(t *testing.T) {
@@ -411,6 +469,34 @@ func TestApplyGeoDoesNotStampDish(t *testing.T) {
 	d.applyGeo(geoInfo{Ts: now.Unix() + 1, IsStarlink: false, ASN: "AS11404", Org: "Qwest"})
 	if d.link.OnStarlink || d.link.Reason != "egress-other" {
 		t.Fatalf("fresh geo without dish belief: %+v", d.link)
+	}
+}
+
+func TestGeoPublishExpires(t *testing.T) {
+	// The last-good policy is bounded: a failed lookup keeps the previous
+	// result, but one older than geoMaxAge without a successful lookup is
+	// no longer published — the egress line goes away instead of showing
+	// an address the machine may have left (moved to IPv6-only: from then
+	// on every lookup fails).
+	d := newDaemon(config{dir: t.TempDir()}, mkStub())
+	d.startWall = t0.Add(-time.Hour)
+	d.geo = geoInfo{IP: "203.0.113.7", IsStarlink: true, ASN: starlinkASN, Org: "Starlink"}
+	for _, tc := range []struct {
+		age     time.Duration
+		publish bool
+	}{
+		{geoMaxAge, true}, {geoMaxAge + time.Second, false}, {time.Hour, false},
+	} {
+		d.geo.Ts = t0.Unix() - int64(tc.age.Seconds())
+		// Both status builders gate the same way, and what a tick persists
+		// is what the panel reads: the geo key is in status.json, or absent.
+		if got := d.buildStatusFail(t0, "refused").Geo; (got != nil) != tc.publish {
+			t.Errorf("fail tick, answer %v old: geo published = %v", tc.age, got != nil)
+		}
+		d.goodTick(t0, onlineStatus(), false, false, 2*time.Second)
+		if _, in := readJSON(t, d.cfg.dir, "status.json")["geo"]; in != tc.publish {
+			t.Errorf("good tick, answer %v old: geo in status.json = %v", tc.age, in)
+		}
 	}
 }
 
@@ -501,6 +587,37 @@ func TestPostTickProbeOneShot(t *testing.T) {
 	d.postTick(now.Add(12*time.Second), false)
 	if !now.Add(12 * time.Second).Before(d.probeUntil) {
 		t.Fatal("fresh failure after recovery did not re-probe")
+	}
+
+	// Re-arming is bounded all the same: a link flapping good/fail forever
+	// must not keep the daemon at the 2 s cadence. Two re-arms were granted
+	// above. One good->fail transition whose failing tick is `at`:
+	flap := func(at time.Time) (before time.Time, armed bool) {
+		before = d.probeUntil
+		d.postTick(at.Add(-10*time.Second), true)
+		d.postTick(at, false)
+		return before, !d.probeUntil.Equal(before)
+	}
+	for i := 2; i < probeArmMax; i++ {
+		if _, armed := flap(now.Add(time.Duration(26+50*(i-2)) * time.Second)); !armed {
+			t.Fatalf("re-arm %d refused, want the first %d in the hour granted", i+1, probeArmMax)
+		}
+	}
+	// The 21st, still inside the hour: no new burst, so the daemon stays on
+	// the idle cadence — which still sees the dish recover.
+	before, armed := flap(now.Add(926 * time.Second))
+	if armed || !d.probeUntil.Equal(before) {
+		t.Fatalf("re-arm %d inside the hour granted: probe until %v, want unchanged %v", probeArmMax+1, d.probeUntil, before)
+	}
+	if _, armed := flap(now.Add(probeArmWindow - 5*time.Second)); armed {
+		t.Fatalf("re-arm granted before the oldest counted one was %v old", probeArmWindow)
+	}
+	// Once the oldest counted re-arm is an hour old, a transition re-arms again.
+	if _, armed := flap(now.Add(probeArmWindow + 5*time.Second)); !armed {
+		t.Fatal("re-arm still refused after the oldest counted one aged out")
+	}
+	if len(d.probeArms) != probeArmMax {
+		t.Fatalf("%d re-arms counted, want %d", len(d.probeArms), probeArmMax)
 	}
 }
 

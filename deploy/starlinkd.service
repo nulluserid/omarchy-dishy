@@ -4,7 +4,12 @@ After=network-online.target
 
 [Service]
 # The daemon parses unauthenticated LAN wire data, so bound the blast radius
-# of any future parsing bug. It writes only under the user's home.
+# of any future parsing bug. The directives below contain an accident in this
+# process — a rogue write, a privilege grab — and nothing more: a user unit
+# runs with the user's own credentials, so they are not a boundary against
+# other code running as that same user. It writes under the user's home
+# (state files) and in $XDG_RUNTIME_DIR (its control socket, plus one symlink
+# to the state dir that the widget reads).
 # (Directives live in [Service] — systemd ignores them in [Unit].)
 NoNewPrivileges=true
 ProtectSystem=full
@@ -12,7 +17,23 @@ PrivateTmp=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=256M
 UMask=0077
-ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd
+# More blast-radius limits: the daemon needs none of what these deny.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+PrivateDevices=yes
+SystemCallArchitectures=native
+# -idle-exit 15m (default 0 = never exit): once neither the widget's heartbeat
+# ("starlinkd panel alive", every 5 min) nor a panel command has arrived for 15 min,
+# the daemon exits cleanly, so a disabled or removed plugin takes its backend
+# down; the next shell start brings it back.
+ExecStart=%h/.config/omarchy/plugins/io.github.nulluserid.dishy/backend/bin/starlinkd -idle-exit 15m
 Restart=on-failure
 RestartSec=5
 # notify-send needs the desktop session bus; omarchy exports it into the

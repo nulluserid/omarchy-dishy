@@ -15,19 +15,23 @@ Then run `./install.sh` once from
 `~/.config/omarchy/plugins/io.github.nulluserid.dishy/` to install the `starlinkd`
 backend service. The bar widget shows live data within ~2 seconds.
 
-After a plugin update (`omarchy plugin update`), restart the shell once to
-pick up dashboard changes — the shell caches QML until restart.
+After a plugin update (`omarchy plugin update`), run `./install.sh`, then
+restart the shell. The installer restarts the daemon with the new binary and
+the shell caches QML until restart — and the daemon now exits after 15
+minutes without a heartbeat from the widget: until the shell restarts, the
+old widget sends none, so the daemon would stop and the widget show stale
+data.
 
 ## What it shows
 
 - **Bar:** satellite glyph + health dot (green online / amber searching or
   attention / red offline / gray no data) and live latency, down throughput,
-  typical active throughput, or icon only (click the widget's settings).
-  Amber covers every attention-worthy dish alert (stuck motors, water,
-  slow ethernet, … — heating and power-save stay green), a pending
-  update reboot, and any disablement code; the tooltip lists all active
-  alerts plus the software-update state, so nothing the dish reports is
-  easy to miss.
+  typical active throughput, or icon only (click the widget's settings); on
+  a vertical bar it is the glyph alone. Amber covers every attention-worthy
+  dish alert (stuck motors, water, slow ethernet, … — heating and
+  power-save stay green), a pending update reboot, and any disablement
+  code. The tooltip leads with the state, up to three active alerts (the
+  rest are counted) and the software-update state, then the numbers.
 - **Auto-hide off-network (1.1):** when the machine is not on a Starlink
   network, the widget hides itself — the dish's exact gRPC target no longer
   answers *as a Starlink dish*, and your traffic provably exits through
@@ -40,26 +44,41 @@ pick up dashboard changes — the shell caches QML until restart.
 - **Bar placement (1.4):** Dishy sits in any bar section and moves like any
   Omarchy widget — `omarchy bar move io.github.nulluserid.dishy --section
   center` (or `right` / `left`); the dashboard follows the button.
+- **Lives with the widget (1.7):** the backend is tied to the widget. The
+  widget keeps `starlinkd` alive with a heartbeat; disable or remove the
+  plugin and its daemon exits by itself within 15 minutes. The next shell
+  start brings it back.
 - **Panel** (click the widget; dense single-view grid, no scrolling):
-  - state chip, dish uptime + short id, hardware/software versions, GPS +
-    ethernet link
-  - latency graph (15 min, 1 s resolution, p50/p95 guides) beside
-    throughput (down fill / up line, typical-active readout) — drop strip
-    and 15-min drop stats under the latency plot
-  - Today chart (per-minute typical active throughput, 30-day rolling
-    history in `~/.local/state/starlinkd/dishes/<dish-id>/day-YYYYMMDD.json`)
-    beside power draw
+  - a Starlink header: the state glyph, a status line (state · uptime ·
+    GPS satellites · ethernet link — a segment is left out when the dish
+    reports no reading for it, as current firmware does for GPS), and the
+    dish's short id with its hardware/software versions
+  - latency graph (15 min, 1 s resolution, p50/p95 as dashed guides with
+    their values in the header) beside throughput (down fill / up line,
+    each value in its series' colour) — drop strip and 15-min drop stats
+    under the latency plot
+  - Today chart (per-minute typical active throughput on a fixed 24-hour
+    axis, the day's peak in its header; 30-day rolling history in
+    `<state dir>/dishes/<dish-id>/day-YYYYMMDD.json`; the state dir is
+    `$XDG_STATE_HOME/starlinkd`, else `~/.local/state/starlinkd`) beside
+    power draw
   - recent outages with cause and duration (dish-reported, latest three)
   - obstruction view (sky-coverage map + stats) beside the egress lookup:
     public IP + approximate exit city/region and carrier — one ifconfig.co
-    query every few minutes, no API key
+    query every 5 minutes — 60 s only while classifying (no fresh answer
+    yet, or right after a route change) — off Starlink too; after a failed
+    lookup nothing is retried for 5 minutes; no API key. The IP check dials
+    IPv4 and accepts only an IPv4 answer, so the address and exit location
+    it shows are the IPv4 ones. A failed lookup keeps the last answer for 15
+    minutes at most; on an IPv6-only network there is then no egress line.
   - one-line usage grid: today / all-time / availability
-  - active dish alert chips + software-update state
+  - up to three alert chips in the header row ("+N more" for the rest)
+    and the software-update state
   - Stow / Unstow / Reboot — each behind an explicit click-to-confirm
 - **Multiple dishes (1.3):** stats are per dish. Move the machine between
   Starlinks (or change the dish address) and each dish keeps its own usage,
-  availability, and day history in
-  `~/.local/state/starlinkd/dishes/<dish-id>/` — alternating between a
+  availability, and day history in `<state dir>/dishes/<dish-id>/` (the
+  state dir is resolved as under "How it works") — alternating between a
   couple of dishes in a week never blends their numbers. A dish you have
   not used before simply starts at zero. Housekeeping (1.5): a partition
   with no connection for 30 days is deleted whole at the next startup or
@@ -73,7 +92,9 @@ pick up dashboard changes — the shell caches QML until restart.
   a dish alert sets, and on sustained heavy obstruction. Notifications fire on
   transitions; a dish that is already unreachable when the daemon starts stays
   quiet on purpose — and (1.1) they never fire for a machine parked on another
-  network: off-network time is not counted as dish downtime.
+  network: off-network time is not counted as dish downtime. Rate-limited
+  (burst 5, then one per 10 s); a refused `notify-send` is reported once in
+  the journal at startup and disables notifications for that run.
 
 ## Requirements
 
@@ -105,6 +126,13 @@ The installer refuses other checkouts: the service always runs the canonical
 plugin path above, so running it in a development clone must not silently
 restart a different binary.
 
+The installer trusts no caller `PATH`: it runs only the standard tools from a
+closed `PATH`, refusing if one is missing; it refuses to write when a
+directory up to `$HOME` is writable by group/others or owned by someone else
+(the message names the fix); and it backs up an existing unit before
+replacing it. `SYSTEMCTL` overrides the systemctl path (used by the hermetic
+test).
+
 Optional keybind — toggle the panel with `omarchy-shell dishy toggle`.
 
 The dish address is a widget setting (default `192.168.100.1:9200`; changing
@@ -116,14 +144,24 @@ Upgrading from ≤ 1.1.1: run `./install.sh` once — the service unit no longer
 pins the dish target, which is what makes the setting (and `starlinkd set
 host`) effective.
 
+Upgrading from ≤ 1.6.0: `omarchy plugin update --yes`, run `./install.sh`
+once (it installs the updated service unit: more sandboxing, and the daemon
+now exits when the widget is gone), then restart the shell
+(`omarchy-restart-shell`). Until the shell restarts the old widget sends no
+heartbeat, so the daemon exits after 15 minutes and the readout goes stale —
+the restart brings both back.
+
 ## Remove
+
+The daemon also exits by itself within 15 minutes of the widget being
+disabled or removed; the manual steps below still remove the unit and state.
 
 ```bash
 systemctl --user disable --now starlinkd.service
 rm ~/.config/systemd/user/starlinkd.service
 systemctl --user daemon-reload
 omarchy plugin remove io.github.nulluserid.dishy   # or delete the plugin directory
-rm -rf ~/.local/state/starlinkd                   # optional: usage/outage history
+rm -rf "${XDG_STATE_HOME:-$HOME/.local/state}"/starlinkd  # optional: usage/outage history
 ```
 
 ## Marketplace
@@ -163,21 +201,52 @@ squatting on that address does not count) and the egress carrier (`AS14593`
 via `ifconfig.co`; the dish LAN subnet is deliberately not a signal — router
 mode LANs use 192.168.5.x/10.0.0.x while all of them route the dish address)
 — with a 10-minute grace when there is no evidence at all
-(captive portal, dish outage). A parked machine costs ~1 KB of status JSON
-every 10 s and one `/proc/net/route` read per tick: no per-tick process
-spawns, no polling threads, no hist writes, no notification spam.
+(captive portal, dish outage). The egress lookup asks `ifconfig.co` every 5
+minutes — off Starlink too — and after a failed lookup nothing is retried
+for 5 minutes. The IP check dials IPv4 and accepts only an IPv4 answer, so
+the address and exit location it shows are the IPv4 ones. A failed lookup
+keeps the last answer for 15 minutes at most; on an IPv6-only network there
+is then no egress line. A parked machine costs ~1 KB of status JSON every
+10 s and one `/proc/net/route` read per tick: no per-tick process spawns, no
+polling threads, no hist writes, no notification spam.
 
-State lives in `~/.local/state/starlinkd/`: `status.json` (scalars +
-`link`/`geo`), `hist.json` (15-min time-ordered series + obstruction map,
-written only while the dashboard is open), `day-YYYYMMDD.json` (per-minute
-typical/ping/up/drop/power aggregates, 30-day rolling), `daily.json` (today +
-all-time usage/availability), `events.jsonl` (transition log). Since v1.3 the
-usage/day-history files live per dish under `dishes/<dish-id>/` (see above).
+State lives in the daemon's state dir — `$XDG_STATE_HOME/starlinkd`, or
+`~/.local/state/starlinkd/` when that variable is unset: `status.json`
+(scalars + `link`/`geo`), `hist.json` (15-min time-ordered series +
+obstruction map, written only while the dashboard is open), `day-YYYYMMDD.json`
+(per-minute typical/ping/up/drop/power aggregates, 30-day rolling),
+`daily.json` (today + all-time usage/availability), `events.jsonl`
+(transition log). Since v1.3 the usage/day-history files live per dish under
+`dishes/<dish-id>/` (see above). The daemon publishes the directory it
+resolved as the symlink `$XDG_RUNTIME_DIR/starlinkd`; the widget and panel
+read through that link first and follow the fresher of it and the default
+path, so a service configured with a different state directory still feeds
+the UI. `STARLINKD_STATE_DIR` overrides the state directory for every caller
+(the widget passes it to its one-shot commands; the demo harness uses it).
 The full contract is documented in
 [`backend/CONTRACT.md`](backend/CONTRACT.md).
 
 Dish controls and the poller CLI: `backend/bin/starlinkd stow|unstow|reboot`;
-the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`.
+the dashboard also drives cadence via `backend/bin/starlinkd panel open|close`
+and keeps the daemon alive with `panel alive`.
+
+## Demo kit
+
+`backend/demo/` is a development tool for working on Dishy off Starlink: a
+loopback-only fake dish with scenarios (`clean`, `busy`, `trouble`), a seeded
+sandbox state dir, and a local egress answer the daemon reads through
+`-geo-url`. It is not installed, started or referenced by `install.sh`, the
+service unit or the plugin's QML.
+
+- **Privacy rule:** never real state, a real IP or location, the real
+  notifier or the real daemon. Everything it shows is invented and lives in
+  its own run directory.
+- **Live-widget rule:** a live-shell demo needs the widget's *Dish address*
+  setting to point at the demo target (`127.0.0.1:9210`) for the session.
+  You set that setting and restore it afterwards — the kit never edits your
+  shell settings.
+
+See [`backend/demo/README.md`](backend/demo/README.md).
 
 ## License
 

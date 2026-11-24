@@ -43,6 +43,13 @@ const (
 	// Minimum seconds between dish-reported outage announcements: a hostile
 	// endpoint rotating start timestamps must not fork notify-send per tick.
 	outageReannounceS = 60
+	// Notification budget: ONE token bucket for every notification emit
+	// sends. The dish decides which transitions fire — 19 alert booleans can
+	// flip per tick, and a good / fail / fail flap is an outage pair every
+	// few ticks — so gates per source never add up to a bound. Starts full;
+	// one token back per notifyRefill on the monotonic clock.
+	notifyBurst  = 5
+	notifyRefill = 10 * time.Second
 	// Consecutive good ticks a NEW dish identity must be answered before
 	// switchDish adopts it (first-ever sighting adopts immediately). A
 	// strictly rotating hostile id then never switches.
@@ -50,6 +57,16 @@ const (
 	// Hard cap on retained dish partitions; beyond it the least-recently
 	// active are evicted (bounds per-tick identity churn).
 	maxDishPartitions = 64
+)
+
+// Failure-probe re-arms are bounded (postTick): a dish alternating good/fail
+// would otherwise start a fresh 30 s fast-poll burst on every transition and
+// keep the daemon at the 2 s cadence indefinitely (measured). Past the bound
+// a transition does not re-arm until the oldest counted one has aged out of
+// the window. Route changes are not counted.
+const (
+	probeArmMax    = 20
+	probeArmWindow = time.Hour
 )
 
 // Array index order inside daemon.arrays.
@@ -68,11 +85,14 @@ type config struct {
 	idleInterval          time.Duration // poll cadence while the dashboard is closed
 	idleHistInterval      time.Duration // background history refresh while closed
 	mapInterval           time.Duration
-	geoInterval           time.Duration // egress lookup while on-network
+	geoInterval           time.Duration // egress lookup on the settled clock (on-network, or answered off-network)
 	geoTransitionInterval time.Duration // egress lookup while classifying / dashboard just opened
+	geoEndpoint           string        // egress lookup URL (-geo-url); the demo harness is its only user
 	once                  bool
 	verbose               bool
 	dir                   string // state dir, ~/.local/state/starlinkd
+	// Exit after this long without a control-socket command (0 = never).
+	idleExit time.Duration
 }
 
 // ---- status.json ----
@@ -81,6 +101,7 @@ type dishInfo struct {
 	ID        string `json:"id"`
 	HW        string `json:"hw"`
 	SW        string `json:"sw"`
+	Dir       string `json:"dir,omitempty"` // partition being written, dishes/<dir>/ (see CONTRACT.md)
 	BootCount int64  `json:"bootCount"`
 	UptimeS   int64  `json:"uptimeS"`
 	EthMbps   int64  `json:"ethMbps"`
@@ -280,9 +301,18 @@ type daemon struct {
 	failed             int
 	maxDishOutageStart int64
 
-	mapData  *obsMap
-	lastMap  time.Time
-	lastHist time.Time // last successful history ingest (drives idle cadence)
+	mapData *obsMap
+	lastMap time.Time
+	// lastMapWhy is the refusal reason last printed for the obstruction
+	// map: a reason repeats only once it has changed, or a map has been
+	// accepted again since (goodTick).
+	lastMapWhy string
+	lastHist   time.Time // last successful history ingest (drives idle cadence)
+
+	// Notification token bucket (emit): starts full, refills on the
+	// monotonic clock. Tick-loop-owned like everything else here.
+	notifyTokens float64
+	notifyAt     time.Time
 
 	// Link state (backend/link.go). Consumers: only the tick loop.
 	link                 linkInfo // onStarlink/reason/since/lastDishOK, published in status.json
@@ -291,12 +321,15 @@ type daemon struct {
 	geo                  geoInfo  // last egress lookup; Ts=0 until the first call
 	geoFetching          bool     // an egress lookup is in flight
 	geoBump              bool     // dashboard (re)opened: refresh geo if older than transition interval
+	lastGeoFailUnix      int64    // unix s of the last failed lookup; failure-backoff anchor (0 = none)
 	geoCh                chan geoInfo
 	lastRoute            string // default-route fingerprint, "" = no default route
 	lastRouteKnown       bool
 	routeChanged         bool      // fingerprint changed since the last geo launch
 	lastRouteChangedUnix int64     // unix s of the last route change; gates egress outages
 	probeUntil           time.Time // one-shot fast-poll burst end
+	probeArms            []time.Time
+	probeHeld            bool
 	panelUntil           time.Time // dashboard-open lease end
 	lastTickAt           time.Time // previous round's tick time, for elapsed dt
 	lastTickOK           bool
@@ -323,6 +356,11 @@ type daemon struct {
 	lastObs    obsStats
 	lastFile   *statusFile // printed by -once
 	lastErr    string      // for rate-limited error logging
+
+	// Idle exit (-idle-exit): the moment the daemon gives up on ever being
+	// polled again. Zero while the flag is off; otherwise start + one period,
+	// pushed out by every control-socket command (applyControl).
+	idleExitAt time.Time
 }
 
 func newDaemon(cfg config, client api.DeviceClient) *daemon {
@@ -337,6 +375,12 @@ func newDaemon(cfg config, client api.DeviceClient) *daemon {
 	}
 	d.day.minute = -1 // no open bucket until the first sample
 	d.resetArrays()
+	d.notifyTokens, d.notifyAt = notifyBurst, time.Now() // notification bucket starts full
+	if cfg.idleExit > 0 {
+		// One full period to hear the first heartbeat: a daemon started at
+		// boot must not exit before the shell has had time to load.
+		d.idleExitAt = time.Now().Add(cfg.idleExit)
+	}
 	return d
 }
 

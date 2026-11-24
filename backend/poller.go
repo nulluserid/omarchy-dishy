@@ -1,6 +1,7 @@
 package main
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"math"
@@ -38,9 +39,13 @@ func dial(target string) (*grpc.ClientConn, error) {
 		}))
 }
 
+// rpcErr renders a failed Handle call as "code: message". The message is
+// the peer's own text, hostile-sized on a hostile endpoint, and it is
+// written into status.json on every fail tick — so the whole string is
+// clipped, never trusted.
 func rpcErr(err error) string {
 	s := grpcstatus.Convert(err)
-	return s.Code().String() + ": " + s.Message()
+	return clip(s.Code().String()+": "+s.Message(), maxRPCErrorRunes)
 }
 
 func (d *daemon) vlog(format string, args ...any) {
@@ -114,13 +119,47 @@ func (d *daemon) tick(active bool) {
 
 // postTick books the one-shot probe: only the transition into failure starts
 // a burst, so a machine parked away from the dish does not permanently poll
-// at 2 s.
+// at 2 s. The transition is not a free pass either: at most probeArmMax
+// bursts in any rolling probeArmWindow. A dish alternating good/fail gets
+// its first bursts and then the idle cadence, which still sees it recover —
+// without the bound it kept the daemon at 2 s indefinitely (measured). The
+// route-change re-arm is separate and stays as it is.
 func (d *daemon) postTick(now time.Time, ok bool) {
 	if !ok && d.lastTickOK {
-		d.probeUntil = now.Add(probeWindow)
-		d.vlog("failure probe: %s window", probeWindow)
+		switch {
+		case d.probeArmAllowed(now):
+			if d.probeHeld {
+				d.probeHeld = false
+				d.vlog("failure probe: re-armed again")
+			}
+			d.probeUntil = now.Add(probeWindow)
+			d.vlog("failure probe: %s window", probeWindow)
+		case !d.probeHeld: // logged on the edge only, not on every held transition
+			d.probeHeld = true
+			d.vlog("failure probe: not re-armed, %d bursts in the last %s", probeArmMax, probeArmWindow)
+		}
 	}
 	d.lastTickOK = ok
+}
+
+// probeArmAllowed records a failure-probe re-arm at now and reports whether
+// it fits the budget: at most probeArmMax in any rolling probeArmWindow. The
+// stamps live in one small slice, pruned in place, so nothing is allocated
+// once it is full.
+func (d *daemon) probeArmAllowed(now time.Time) bool {
+	cutoff := now.Add(-probeArmWindow)
+	kept := d.probeArms[:0]
+	for _, t := range d.probeArms {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	d.probeArms = kept
+	if len(kept) >= probeArmMax {
+		return false
+	}
+	d.probeArms = append(kept, now)
+	return true
 }
 
 // publishPendingTick writes status.json (no hist/day writes) for a debounced
@@ -140,17 +179,20 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// before anything books (CONTRACT.md v4). A new id from a KNOWN dish must
 	// persist for dishSwitchDebounceTicks consecutive good ticks first: a
 	// hostile endpoint rotating ids per tick then never creates partitions.
-	if id := s.GetDeviceInfo().GetId(); id != "" {
-		hw := s.GetDeviceInfo().GetHardwareVersion()
+	// The id and hardware string are taken clipped from the trust boundary
+	// (identifyDish): the id compared here is the same one that reaches the
+	// partition, every state file and the notification text.
+	ident := identifyDish(s)
+	if id := ident.ID; id != "" {
 		switch {
 		case d.dishID == "":
-			d.switchDish(now, id, hw) // first sighting adopts immediately
+			d.switchDish(now, id, ident.HW) // first sighting adopts immediately
 		case id == d.dishID:
 			d.pendingID, d.pendingIDTicks = "", 0
 		case id == d.pendingID:
 			d.pendingIDTicks++
 			if d.pendingIDTicks >= dishSwitchDebounceTicks {
-				d.switchDish(now, id, hw)
+				d.switchDish(now, id, ident.HW)
 			} else {
 				d.publishPendingTick(now, s)
 				return
@@ -200,8 +242,11 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 			}
 			res = d.ingest(hh, uptime, haveUp, now)
 			d.lastHist = now
-			d.observeDishOutages(hh.GetOutages(), now, ingestGap)
-			d.lastOutages = toOutages(hh.GetOutages())
+			// Bounded once, at ingestion: both consumers below see the same
+			// newest maxOutageEntries outages, never the delivered list whole.
+			outages := newestOutages(hh.GetOutages(), maxOutageEntries)
+			d.observeDishOutages(outages, now, ingestGap)
+			d.lastOutages = toOutages(outages)
 			histOK = true
 		} else if h != nil {
 			d.vlog("history: short response")
@@ -211,10 +256,39 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// Obstruction map is only needed for the dashboard: skip entirely while
 	// the panel is closed. On the first open the last map is minutes old —
 	// good enough until the next active due tick refreshes it.
+	//
+	// The refresh clock advances on EVERY completed attempt, whatever came
+	// of it — accepted, refused by validation, refused by the per-call size
+	// cap, timed out, unavailable — so the endpoint is asked at most once
+	// per mapInterval, and a hanging one costs the tick loop at most one RPC
+	// timeout per interval. There is no retry on failure: retrying on the
+	// next tick turned an oversize answer into a per-tick download
+	// (measured: 9 requests in 9 active ticks). Only an accepted map
+	// replaces the last one — last-good-wins, the rule the state files follow
+	// ("a hostile value must not replace previously written state"). A
+	// switch clears the map explicitly, so nothing of the old dish's
+	// survives here. A validation refusal is printed with its reason —
+	// with or without -v, once per reason until it changes or a map is
+	// accepted again.
 	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
-		if m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}}); m != nil {
-			d.mapData = toObsMap(m.GetDishGetObstructionMap())
-			d.lastMap = now
+		m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
+			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes))
+		d.lastMap = now
+		om, why := toObsMap(m.GetDishGetObstructionMap())
+		switch {
+		case om != nil:
+			d.mapData = om
+			d.lastMapWhy = ""
+		case m != nil: // a failed RPC was already logged by fetch
+			// Printed unconditionally: the shipped unit runs without -v, and
+			// behind warn the reason never reached a default install's
+			// journal. Bounded on its own key — warn's is cleared by every
+			// good status tick, so a continuing refusal repeated on each
+			// attempt there.
+			if why != d.lastMapWhy {
+				fmt.Fprintf(osStderr, "starlinkd: obstruction_map: rejected (%s)\n", why)
+				d.lastMapWhy = why
+			}
 		}
 	}
 
@@ -304,11 +378,13 @@ func (d *daemon) failTick(now time.Time, msg string, dt time.Duration, active bo
 	d.persist(now, sf, nil)
 }
 
-// fetch performs one unary Handle call; nil response on any failure.
-func (d *daemon) fetch(now time.Time, req *api.Request) *api.Response {
+// fetch performs one unary Handle call; nil response on any failure. opts
+// are per-call gRPC options — a reply cap belongs to the one RPC that needs
+// it, never to the client-wide default the other calls share.
+func (d *daemon) fetch(now time.Time, req *api.Request, opts ...grpc.CallOption) *api.Response {
 	ctx, cancel := context.WithTimeout(context.Background(), rpcTimeout)
 	defer cancel()
-	resp, err := d.client.Handle(ctx, req)
+	resp, err := d.client.Handle(ctx, req, opts...)
 	if err != nil {
 		d.warn(requestName(req) + ": " + rpcErr(err))
 		return nil
@@ -485,6 +561,11 @@ func pf(v float64, n int) *float64 {
 
 // ---- dish-reported outages ----
 
+// maxOutageEntries bounds the dish-reported outage list kept from one
+// history answer: newestOutages keeps the newest this many at ingestion, and
+// observeDishOutages walks at most this many.
+const maxOutageEntries = 100
+
 func toOutages(list []*dish.DishOutage) []outage {
 	out := make([]outage, 0, len(list))
 	for _, o := range list {
@@ -497,6 +578,50 @@ func toOutages(list []*dish.DishOutage) []outage {
 	return out
 }
 
+// outageHeap is newestOutages' running "newest so far" set: a min-heap on the
+// start timestamp, so the root is always the oldest kept entry — the one a
+// newer delivered outage evicts.
+type outageHeap []*dish.DishOutage
+
+func (h outageHeap) Len() int { return len(h) }
+func (h outageHeap) Less(i, j int) bool {
+	return h[i].GetStartTimestampNs() < h[j].GetStartTimestampNs()
+}
+func (h outageHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *outageHeap) Push(x any)   { *h = append(*h, x.(*dish.DishOutage)) }
+func (h *outageHeap) Pop() any {
+	old := *h
+	x := old[len(old)-1]
+	*h = old[:len(old)-1]
+	return x
+}
+
+// newestOutages keeps the newest n outages by start time, oldest first. It
+// does not lean on the dish's delivery order — the capture holds a single
+// outage, so there is no documented order an end-truncation could trust —
+// and it holds at most n entries: a list as long as the gRPC message limit
+// allows costs one pass and no allocation that grows with it.
+func newestOutages(list []*dish.DishOutage, n int) []*dish.DishOutage {
+	if len(list) <= n {
+		return list
+	}
+	h := make(outageHeap, n)
+	copy(h, list[:n])
+	heap.Init(&h)
+	for _, o := range list[n:] {
+		if o.GetStartTimestampNs() > h[0].GetStartTimestampNs() {
+			h[0] = o // newer than the oldest kept one: evict it
+			heap.Fix(&h, 0)
+		}
+	}
+	// Pops come out oldest first, straight into the head of the delivered
+	// slice (free by now), so the result reuses that backing array.
+	for i := 0; i < n; i++ {
+		list[i] = heap.Pop(&h).(*dish.DishOutage)
+	}
+	return list[:n]
+}
+
 // observeDishOutages fires outage_start for an outage the dish reports as
 // just beginning. Historical entries only prime the watermark. The freshness
 // window derives from the ingest gap (a ring skimmed every 60 s still
@@ -504,9 +629,8 @@ func toOutages(list []*dish.DishOutage) []outage {
 // parked away, outages that started (and likely ended) long ago are recorded
 // silently instead of announced as new.
 func (d *daemon) observeDishOutages(list []*dish.DishOutage, now time.Time, gap time.Duration) {
-	const maxOutageEntries = 100
 	if len(list) > maxOutageEntries {
-		list = list[:maxOutageEntries] // hostile lists are bounded, not unbounded work
+		list = list[:maxOutageEntries] // second guard: the tick path is already bounded
 	}
 	window := int64(gap.Seconds()) + 2
 	if window > int64(maxOutageAnnounceWindow.Seconds()) {
@@ -583,24 +707,67 @@ func (d *daemon) handleTransitions(now time.Time, s *dish.DishGetStatusResponse,
 	}
 }
 
-// emit appends an event and, when summary is non-empty, sends a notification.
-// Neither is ever fatal.
+// emit appends an event and, when summary is non-empty, sends a
+// notification — unless the notification bucket is spent, in which case the
+// event is still recorded and only the notification is dropped. Neither is
+// ever fatal. notifySend stays synchronous; the bucket is what bounds how
+// long that can stall the tick loop — at most notifyBurst sends, each under
+// its own timeout, per refill window.
 func (d *daemon) emit(ev event, summary, body string) {
 	ev.Ts = time.Now().Unix()
 	if err := appendEvent(d.cfg.dir, ev); err != nil {
 		d.vlog("events: %v", err)
 	}
-	if summary != "" {
-		if err := notifySend(summary, body); err != nil {
-			d.vlog("notify: %v", err)
-		}
+	if summary == "" {
+		return
 	}
+	if !d.notifyAllowed() {
+		d.vlog("notify: rate-limited (%s)", summary)
+		return
+	}
+	if err := notifySend(summary, body); err != nil {
+		d.vlog("notify: %v", err)
+	}
+}
+
+// notifyAllowed takes one token from the notification bucket. Refill is
+// measured on the monotonic reading time.Now() carries, so a wall-clock jump
+// can neither drain it nor refill it.
+func (d *daemon) notifyAllowed() bool {
+	now := time.Now()
+	d.notifyTokens = min(notifyBurst, d.notifyTokens+now.Sub(d.notifyAt).Seconds()/notifyRefill.Seconds())
+	d.notifyAt = now
+	if d.notifyTokens < 1 {
+		return false
+	}
+	d.notifyTokens--
+	return true
 }
 
 // ---- file builders ----
 
+// dishIdent is a dish's identity as the daemon may use it anywhere: the
+// device id, hardware and software strings of an answer, clipped at the dish
+// trust boundary. Every consumer — status.json on good and fail ticks, the
+// identity comparison in goodTick, the partition key, config.json's
+// lastDish, events.jsonl and the notification text — derives from this one
+// conversion, so they all agree on the same bounded id.
+type dishIdent struct {
+	ID, HW, SW string
+}
+
+func identifyDish(s *dish.DishGetStatusResponse) dishIdent {
+	di := s.GetDeviceInfo()
+	return dishIdent{
+		ID: clip(di.GetId(), maxDishStrRunes),
+		HW: clip(di.GetHardwareVersion(), maxDishStrRunes),
+		SW: clip(di.GetSoftwareVersion(), maxDishStrRunes),
+	}
+}
+
 func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state, detail string) *statusFile {
 	di := s.GetDeviceInfo()
+	ident := identifyDish(s)
 	o := s.GetObstructionStats()
 	totalOut, countOut := outagesInWindow(d.lastOutages, now.Unix(), 15*60)
 	p50, p95, mean := latStats(d.arrays[aLat], 300)
@@ -609,9 +776,10 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 		Ts: now.Unix(),
 		Ok: true,
 		Dish: dishInfo{
-			ID:        di.GetId(),
-			HW:        di.GetHardwareVersion(),
-			SW:        di.GetSoftwareVersion(),
+			ID:        ident.ID,
+			HW:        ident.HW,
+			SW:        ident.SW,
+			Dir:       d.publishedDir(),
 			BootCount: int64(di.GetBootcount()),
 			UptimeS:   int64(s.GetDeviceState().GetUptimeS()),
 			EthMbps:   int64(s.GetEthSpeedMbps()),
@@ -658,7 +826,7 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 		},
 		Link: d.link,
 	}
-	if d.geo.Ts > 0 {
+	if geoPublishable(d.geo, now) {
 		g := d.geo
 		sf.Geo = &g
 	}
@@ -681,12 +849,13 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 		},
 	}
 	if s := d.lastStatus; s != nil && s.GetDeviceInfo() != nil {
-		di := s.GetDeviceInfo()
+		ident := identifyDish(s) // the same clipped identity the good ticks published
 		sf.Dish = dishInfo{
-			ID: di.GetId(), HW: di.GetHardwareVersion(), SW: di.GetSoftwareVersion(),
-			BootCount: int64(di.GetBootcount()), EthMbps: int64(s.GetEthSpeedMbps()),
+			ID: ident.ID, HW: ident.HW, SW: ident.SW,
+			BootCount: int64(s.GetDeviceInfo().GetBootcount()), EthMbps: int64(s.GetEthSpeedMbps()),
 		}
 	}
+	sf.Dish.Dir = d.publishedDir() // set even before any answer: an adopted partition is being written
 	sf.Usage = usageStats{
 		DownGB:        round(float64(d.daily.DownBytes)/1e9, 2),
 		UpGB:          round(float64(d.daily.UpBytes)/1e9, 2),
@@ -698,7 +867,7 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 		SessionPct: pct(d.sessionOnlineS, d.sessionS),
 	}
 	sf.Link = d.link
-	if d.geo.Ts > 0 {
+	if geoPublishable(d.geo, now) {
 		g := d.geo
 		sf.Geo = &g
 	}
@@ -736,27 +905,77 @@ func (d *daemon) buildHist(now time.Time) *histFile {
 	}
 }
 
-func toObsMap(m *dish.DishGetObstructionMapResponse) *obsMap {
+// Obstruction-map bounds at the dish trust boundary. The endpoint is
+// unauthenticated, and the QML consumer visits every declared cell on the
+// GUI thread while re-parsing hist.json every 2 s — an unbounded map is a
+// shell stall the dish can trigger at will.
+const (
+	// maxObsMapDim caps each declared dimension. A real dish reports
+	// 123x123 (the live Mini; the round dish reported the same grid in
+	// 2021), so 256x256 leaves room without admitting stall-sized grids.
+	maxObsMapDim = 256
+	// maxObsMapRecvBytes caps the DishGetObstructionMap reply per call, not
+	// client-wide: a map at the bound is 256 KiB on the wire (packed
+	// float32), while GetHistory legitimately carries five 900-sample arrays
+	// and keeps the gRPC default.
+	maxObsMapRecvBytes = 1 << 20
+)
+
+// toObsMap converts a dish obstruction map into the published shape, or
+// refuses it WHOLE with the reason why. The QML consumer loops rows*cols on
+// the GUI thread (ObsMap.qml), so a response that is not a coherent, bounded
+// grid is rejected rather than truncated or repaired — never trust a partial
+// view of the sky. The reason is what the daemon logs, so a refusal is never
+// silent: an operator reading the log can tell a hostile grid from a dish
+// that changed its format.
+func toObsMap(m *dish.DishGetObstructionMapResponse) (*obsMap, string) {
 	if m == nil {
-		return nil
+		return nil, "no map in the answer"
 	}
 	rows, cols := int(m.GetNumRows()), int(m.GetNumCols())
-	// A hostile response can declare absurd or incoherent grids; the QML
-	// consumer loops rows*cols on the GUI thread (ObsMap.qml), so a map
-	// that cannot be rendered from the delivered cells is rejected whole.
-	if rows < 1 || cols < 1 || rows > 2048 || cols > 2048 || rows*cols > len(m.GetSnr()) {
-		return nil
+	// Dimensions first: rows*cols is evaluated only once both are bounded,
+	// so uint32-max dims can never overflow the product.
+	why := ""
+	switch {
+	case rows < 1:
+		why = fmt.Sprintf("rows %d < 1", rows)
+	case rows > maxObsMapDim:
+		why = fmt.Sprintf("rows %d > %d", rows, maxObsMapDim)
+	case cols < 1:
+		why = fmt.Sprintf("cols %d < 1", cols)
+	case cols > maxObsMapDim:
+		why = fmt.Sprintf("cols %d > %d", cols, maxObsMapDim)
 	}
-	snr := make([]float64, len(m.GetSnr()))
+	if why != "" {
+		return nil, why
+	}
+	// Exactly the declared grid. The old rule (rows*cols <= len(snr)) let a
+	// response pad the file with every cell it delivered.
+	if n := len(m.GetSnr()); n != rows*cols {
+		return nil, fmt.Sprintf("%d cells, want rows*cols = %d", n, rows*cols)
+	}
+	snr := make([]float64, rows*cols)
 	for i, v := range m.GetSnr() {
-		snr[i] = round(float64(v), 2)
+		// Finiteness is decided on the RAW cell: round() maps NaN/Inf to 0,
+		// which would pass a hostile cell off as a clear one instead of
+		// rejecting the map whole, like the history samples are skipped.
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil, fmt.Sprintf("non-finite cell %v", float64(v))
+		}
+		// CONTRACT.md: 0..1 per cell, -1 = no data. The range check runs on
+		// the rounded value, because that is what gets published.
+		c := round(float64(v), 2)
+		if c < -1 || c > 1 {
+			return nil, fmt.Sprintf("cell %v outside [-1, 1]", c)
+		}
+		snr[i] = c
 	}
 	return &obsMap{
-		Rows:        int(m.GetNumRows()),
-		Cols:        int(m.GetNumCols()),
+		Rows:        rows,
+		Cols:        cols,
 		MaxThetaDeg: round(float64(m.GetMaxThetaDeg()), 1),
 		Snr:         snr,
-	}
+	}, ""
 }
 
 // pct is online/total as a percentage rounded to 2 decimals; 100 when empty.

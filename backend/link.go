@@ -14,11 +14,15 @@
 //	grace        — no evidence at all; keep showing for linkGraceWindow
 //	               (outage, captive portal, dish reboot), then hide
 //
-// The egress lookup is ifconfig.co/json (no key, documented ~1 request/min
-// courtesy limit): every geoInterval on the network, every
-// geoTransitionInterval while classifying or after a dashboard open, and
-// immediately after a default-route change. Lookups run off the tick path so
-// a slow provider never delays a status write.
+// The egress lookup hits ifconfig.co/json by default (no key, documented
+// ~1 request/min courtesy limit; -geo-url overrides the endpoint for the
+// demo harness): every geoInterval once the network is settled — on it, or
+// a fresh answer naming another carrier — every geoTransitionInterval only
+// while classifying (no fresh answer yet, or right after a default-route
+// change), on a dashboard open when the answer is over the transition
+// interval old, and a full geoInterval after any failure — except that a
+// default-route change still looks up at once (maybeFetchGeo). Lookups run
+// off the tick path so a slow provider never delays a status write.
 package main
 
 import (
@@ -29,14 +33,16 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
-const geoEndpoint = "https://ifconfig.co/json"
+const defaultGeoEndpoint = "https://ifconfig.co/json"
 const maxGeoBytes = 1 << 20
 
 // updateRoute refreshes the default-route fingerprint. A change starts the
@@ -160,20 +166,59 @@ func geoEvidence(g geoInfo, now time.Time) bool {
 	return g.Ts > 0 && now.Unix()-g.Ts <= int64(linkGraceWindow.Seconds())
 }
 
-// maybeFetchGeo starts an egress lookup when the stored one is due: on the
-// normal clock while on-network, on the transition clock while classifying,
-// and (on the dashboard-open open command) whenever it is older than the
-// transition interval.
+// geoMaxAge bounds the last-good policy. A failed lookup keeps the stored
+// result — one flaky answer must not blank the egress line — but a result
+// older than this without a successful lookup is no longer published: it
+// describes a network the machine may have left, and on one with no IPv4
+// route (moved to IPv6-only) no later lookup can ever correct it. The
+// egress line then goes away, as on a cold start, instead of showing a
+// stale address (geoPublishable).
+const geoMaxAge = 15 * time.Minute
+
+// geoPublishable answers whether the stored geo result still goes into
+// status.json: present, and no older than geoMaxAge.
+func geoPublishable(g geoInfo, now time.Time) bool {
+	return g.Ts > 0 && now.Sub(time.Unix(g.Ts, 0)) <= geoMaxAge
+}
+
+// maybeFetchGeo starts an egress lookup when the stored one is due.
+//
+// Cadence rule. The transition clock (geoTransitionInterval) applies only
+// while classifying: there is no fresh geo evidence yet (geoEvidence false —
+// startup, or the last answer aged past the grace window) or the default
+// route just changed (the stored answer describes the route we left). Every
+// other state runs on the settled clock (geoInterval) — INCLUDING a settled
+// off-network machine: a fresh answer naming another carrier is a finished
+// classification, not a pending one, so it is re-checked like any on-network
+// answer. The dashboard-open command still refreshes an answer that is older
+// than the transition interval. (The marker's onStarlink is no input here:
+// keying the fast clock on it kept asking every 60 s for as long as the
+// machine was away, contradicting CONTRACT.md "status.json — geo".)
+//
+// Failure backoff. After a failed lookup the clocks hold for a full
+// geoInterval — settled, transition, and the dashboard-open bump alike. A
+// failing lookup used to be re-launched on the very next tick: the stored
+// answer was already older than the transition clock (or there was none),
+// so an offline machine or a captive portal was asked once per tick,
+// forever. One thing still looks up at once: a default-route change. The
+// network changed under us, so the failure says nothing about the route we
+// are on now — and it is how the boot race (daemon up before the network)
+// recovers on the next tick instead of after the backoff. A later success
+// clears the backoff.
 func (d *daemon) maybeFetchGeo(now time.Time, active bool) {
 	if d.geoFetching {
 		return
 	}
+	// Failure backoff, except across a default-route change.
+	if d.lastGeoFailUnix != 0 && !d.routeChanged &&
+		now.Sub(time.Unix(d.lastGeoFailUnix, 0)) < d.cfg.geoInterval {
+		return
+	}
 	age := now.Sub(time.Unix(d.geo.Ts, 0))
-	// Fresh egress lookup whenever the answer could change: normal clock on a
-	// settled network, transition clock while classifying or right after a
-	// default-route flip.
-	if pending := !d.link.OnStarlink || d.routeChanged; age >= d.cfg.geoInterval ||
-		(pending && age >= d.cfg.geoTransitionInterval) {
+	// Fresh egress lookup whenever the answer could change: settled clock, or
+	// the transition clock while classifying.
+	classifying := !geoEvidence(d.geo, now) || d.routeChanged
+	if age >= d.cfg.geoInterval || (classifying && age >= d.cfg.geoTransitionInterval) {
 		d.routeChanged = false
 		d.startGeoFetch()
 		return
@@ -189,7 +234,7 @@ func (d *daemon) startGeoFetch() {
 	d.geoFetching = true
 	at := time.Now() // answer describes the network as of the request launch
 	go func() {
-		g, err := fetchGeo(at)
+		g, err := d.fetchGeo(at)
 		if err != nil {
 			d.vlog("geo: %v", err)
 		}
@@ -216,23 +261,67 @@ func (d *daemon) drainGeo() {
 func (d *daemon) applyGeo(g geoInfo) {
 	d.geoFetching = false
 	if g.Ts == 0 {
-		return // failed lookup: keep the last known result
+		// Failed lookup: keep the last known result — last-good, published
+		// for at most geoMaxAge (geoPublishable) — and anchor the failure
+		// backoff (maybeFetchGeo).
+		d.lastGeoFailUnix = time.Now().Unix()
+		return
 	}
 	d.geo = g
+	d.lastGeoFailUnix = 0 // a success clears the failure backoff
 	d.updateLink(time.Now(), d.lastDishOK)
 }
 
-// fetchGeo performs one egress lookup. A failed call returns a zero geoInfo —
-// applyGeo keeps the previous result. Timestamped at `at` (the request
-// launch), so a lookup in flight during a route change can never masquerade
-// as a post-change answer.
-func fetchGeo(at time.Time) (geoInfo, error) {
-	return fetchGeoURL(at, geoEndpoint)
+// fetchGeo performs one egress lookup against the configured endpoint
+// (config.geoEndpoint). A failed call returns a zero geoInfo — applyGeo
+// keeps the previous result, published for at most geoMaxAge. Timestamped
+// at `at` (the request launch), so a lookup in flight during a route
+// change can never masquerade as a post-change answer.
+func (d *daemon) fetchGeo(at time.Time) (geoInfo, error) {
+	return fetchGeoURL(at, d.cfg.geoEndpoint)
 }
 
+// geoTransport is http.DefaultTransport in every respect — proxy
+// environment, HTTP/2, timeouts, one pooled connection set — with a single
+// difference: it dials IPv4 only. Built once, like the default itself.
+var geoTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			// Hostnames are resolved by the time Control runs, so `address`
+			// is a candidate IP literal. A refusal makes the dialer move on
+			// to the next resolved address; with none left the dial fails.
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			if ip := net.ParseIP(host); ip == nil || ip.To4() == nil {
+				return errors.New("egress lookup is IPv4-only")
+			}
+			return nil
+		},
+	}).DialContext
+	return t
+}()
+
+// fetchGeoURL performs one egress GET against `endpoint` over geoTransport.
+//
+// IPv4 on both ends — no flag and no IPv6 fallback. The lookup leaves over
+// IPv4, so the provider sees an IPv4 source address and answers with the IPv4
+// address and its exit POP. The dial alone does not guarantee that: through an
+// IPv4-connected proxy the provider sees the proxy's egress and may answer
+// with an IPv6 address, which locates a different exit, one that is far harder
+// to track down. So the answer's address is validated here, and anything that
+// is not an IPv4 address fails the lookup. On a network with no IPv4 route the
+// lookup fails the same way, and the normal failure backoff applies: no
+// egress line in the panel once a previous result has aged past geoMaxAge,
+// and link classification falls back to dish evidence and the grace window.
 func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	client := &http.Client{
-		Timeout: 5 * time.Second,
+		Timeout:   5 * time.Second,
+		Transport: geoTransport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -268,15 +357,30 @@ func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return geoInfo{}, err
 	}
+	// The address is validated, never clipped: it is the one field a lookup
+	// exists for, and a made-up one would be published as fact. Only a
+	// string that parses as an IPv4 address stands — not IPv6, not an
+	// IPv4-mapped IPv6 form, not a missing or malformed one. Anything else
+	// is a failed lookup like an unreachable provider: it counts toward the
+	// failure backoff, and the last good result stands (applyGeo).
+	ip, err := netip.ParseAddr(raw.IP)
+	if err != nil || !ip.Is4() {
+		return geoInfo{}, fmt.Errorf("answer: %q is not an IPv4 address", clip(raw.IP, maxGeoIPRunes))
+	}
+	// Every string here is the provider's to size, and each lands in every
+	// status.json until the next lookup: bound them once, where they enter.
+	// The carrier verdict reads the clipped values, so it can never disagree
+	// with the text that is published beside it.
+	asn, org := clip(raw.ASN, maxGeoASNRunes), clip(raw.ASNOrg, maxGeoTextRunes)
 	return geoInfo{
 		Ts:         at.Unix(),
-		IP:         raw.IP,
-		City:       raw.City,
-		Region:     raw.RegionName,
-		Country:    raw.CountryISO,
-		ASN:        raw.ASN,
-		Org:        raw.ASNOrg,
-		IsStarlink: isStarlinkCarrier(raw.ASN, raw.ASNOrg),
+		IP:         ip.String(),
+		City:       clip(raw.City, maxGeoTextRunes),
+		Region:     clip(raw.RegionName, maxGeoTextRunes),
+		Country:    clip(raw.CountryISO, maxGeoCountryRunes),
+		ASN:        asn,
+		Org:        org,
+		IsStarlink: isStarlinkCarrier(asn, org),
 	}, nil
 }
 

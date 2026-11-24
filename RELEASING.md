@@ -67,7 +67,11 @@ Before asking a maintainer to check again, record these checks in the release/PR
 - Artifact boundaries: actual linked compiler and module versions, current
   advisories, build settings, reproducibility, and manifest/binary/tag consistency.
 - Real surface: isolated daemon smoke test; plugin validation and local UI smoke
-  when QML changes. Name anything not exercised rather than calling it covered.
+  when QML changes — the demo kit (`backend/demo/`) allows a local UI smoke and
+  fresh screenshots while off Starlink. Name anything not exercised rather than
+  calling it covered: a demo run stands in for the dish, the egress provider
+  and the notifier, so it exercises none of the real ones, nor the live
+  service.
 - Evidence identity: **full final main SHA**, binary SHA-256, tool/scanner versions,
   successful CI URL, and an independent review of the exact outgoing diff.
 
@@ -94,7 +98,18 @@ If any file other than the entry point changed — `Panel.qml`, `Model.js`,
 restart the shell (`omarchy-restart-shell`): the plugin file watcher does
 **not** invalidate the QML engine cache for non-entrypoint files, so the
 new panel only appears after a shell restart. Verify against the live
-state files in `~/.local/state/starlinkd/`.
+state files in `~/.local/state/starlinkd/` (`$XDG_STATE_HOME/starlinkd` when
+that variable is set; `$XDG_RUNTIME_DIR/starlinkd` always resolves to the
+daemon's state dir).
+
+For the 1.7.0 upgrade the restart is not conditional: run `./install.sh`,
+then restart the shell. Until the new widget loads it sends no heartbeat, and
+the new unit's daemon exits 15 minutes after `install.sh` restarted it. The
+daemon republishes `$XDG_RUNTIME_DIR/starlinkd` at every start.
+
+Plugin QML must qualify the palette singleton — `import qs.Commons as
+Commons`, then `Commons.Color.*` — because Qt 6.12 ships its own `Color`
+type that would otherwise shadow it.
 
 ## 4. Marketplace update
 
@@ -110,6 +125,17 @@ it promptly:
    URL, and the full 40-char SHA of the new `main` HEAD.
 3. A bot runs the security baseline against that exact commit; a maintainer
    applies `approved-and-verified` and the listing snapshot advances.
+
+The listing's automated baseline must stay at its three capabilities — the
+bundled binary, service management and the installer. The scanner reads
+`.sh .bash .zsh .fish .qml .js .mjs .cjs .py .rb .pl .lua .service .sudoers
+.toml .yaml .yml .desktop` files, the root README, every executable file,
+extensionless files, and anything named install, installer, setup or uninstall
+(including `backend/test-install.sh`); it does not read `.go` files, `.md`
+files other than the root README, or `.github/`. In what it reads, never put
+a package-manager command name or a privilege-escalation word outside a
+negated phrase, and never in an `echo`: a whole-tree run over-reports, so
+predict the bot with the scanner's real scope.
 
 While the initial submission is still under review, reply on that issue with
 the same evidence and the final SHA instead of filing a duplicate submission.
