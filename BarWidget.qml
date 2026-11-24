@@ -115,6 +115,11 @@ BarWidget {
   }
 
   readonly property string label: root.glyph + (root.value !== "" ? " " + root.value : "")
+  // The button's text: the glyph and the reading on a horizontal bar. A
+  // vertical bar gives each widget a slot only as wide as the bar is thick,
+  // so there it is the glyph alone — which the shell then draws as an icon
+  // (WidgetButton's icon contract) — whatever `show` is set to.
+  readonly property string barText: root.vertical ? root.glyph : root.label
 
   function tick() {
     var nowS = Date.now() / 1000
@@ -372,7 +377,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.label
+    text: root.barText
     tooltipText: root.statusData && !root.stale ? Model.summary(root.statusData) : "Starlink — NO_DATA"
     horizontalMargin: 8.75
     onPressed: function(b) {
