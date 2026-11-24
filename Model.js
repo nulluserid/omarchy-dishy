@@ -90,8 +90,9 @@ function alertList(status) {
   return alerts.length > MAX_ALERTS ? alerts.slice(0, MAX_ALERTS) : alerts
 }
 
-// Every alert the dish currently reports, as labels — the full set, shown in
-// the tooltip so nothing the dish knows stays hidden from the user.
+// Every alert the dish currently reports, as labels — in the daemon's order,
+// its most severe first. The panel's row and the tooltip name the leading
+// ones (fitChips, summary) and count the rest.
 function allAlertLabels(status) {
   var out = []
   var alerts = alertList(status)
@@ -474,29 +475,24 @@ function pickSource(current, read, nowS, hasRuntime) {
   return result
 }
 
-// One-line bar tooltip summary: state + live numbers + every active alert
-// and the software-update state, so a glance at the tooltip never misses
-// what the dish is telling us.
+// One-line bar tooltip: the state first, then what asks for attention — up
+// to MAX_ROW_LABELS alerts, "+N more" for the rest, and the update notice —
+// and only then the live numbers, so trouble is read before the line runs
+// long. One line without wrapping: the bar draws it as a single Text.
 function summary(status) {
   if (!status) return "Starlink — waiting for starlinkd"
   var st = String(status.state || "NO_DATA")
   if (st === "NO_DATA" || st === "") return "Starlink — waiting for starlinkd"
   var live = status.live || {}
   var parts = [titleCase(st)]
+  var alerts = allAlertLabels(status)
+  for (var i = 0; i < alerts.length && i < MAX_ROW_LABELS; i++) parts.push("⚠ " + alerts[i])
+  if (alerts.length > MAX_ROW_LABELS) parts.push("⚠ +" + (alerts.length - MAX_ROW_LABELS) + " more")
+  var notice = updateNotice(status)
+  if (notice !== "") parts.push(notice)
   if (live.latencyMs !== null && live.latencyMs !== undefined) parts.push(fmtMs(live.latencyMs))
   if (live.downMbps !== null && live.downMbps !== undefined)
     parts.push("↓" + fmtMbps(live.downMbps) + " ↑" + fmtMbps(live.upMbps))
-  if (live.typicalDownMbps !== null && live.typicalDownMbps !== undefined)
-    parts.push("typ ↓" + fmtMbps(live.typicalDownMbps))
   if (live.powerW !== null && live.powerW !== undefined) parts.push(fmtW(live.powerW))
-  var alerts = allAlertLabels(status)
-  for (var i = 0; i < alerts.length; i++) parts.push("⚠ " + alerts[i])
-  var det = String(status.stateDetail || "")
-  if (det !== "" && det.indexOf("REBOOT") < 0) parts.push(titleCase(det))
-  var u = status.update || {}
-  if (u.state === "REBOOT_REQUIRED") parts.push("update: reboot required")
-  else if (u.state === "FETCHING" || u.state === "WRITING")
-    parts.push("update: " + fmtPct(u.progressPct * 100, 0))
-  else if (u.state === "FAULTED") parts.push("update: faulted")
   return parts.join("  ·  ")
 }
