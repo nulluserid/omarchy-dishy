@@ -183,7 +183,9 @@ All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
 
 - `map` (v5): rows and cols each 1..256, exactly rows·cols cells, each a
   finite raw value that rounds into [-1, 1] (0..1 per cell, -1 = no data).
-  Anything else refuses the map whole, logged once per distinct reason; the
+  Anything else refuses the map whole and prints the reason on stderr
+  (journald under systemd) with or without `-v` — once per distinct reason,
+  until the reason changes or a map is accepted again; the
   DishGetObstructionMap reply is capped at 1 MiB per call. Refreshed every
   60 s while the dashboard is open; a refused or failed attempt also waits
   60 s, and the last accepted map is kept.
@@ -434,7 +436,8 @@ un-stoppable — and the timeout is a uniform 15 minutes.
 - `-idle-hist-interval`: background history refresh while closed (default 60 s).
 - `-map-interval`: obstruction map refresh (dashboard open only).
 - `-once`: single tick, write files, print status.json to stdout, exit.
-- `-v`: log transitions + errors to stderr (journald under systemd).
+- `-v`: log transitions + errors to stderr (journald under systemd). A refused
+  obstruction map's reason is printed without it (see `hist.json`).
 - `-idle-exit <duration>`: exit cleanly (status 0) once no control-socket
   command arrived for this long (default 0 = never; the service unit passes
   `15m`).
@@ -456,7 +459,8 @@ history-array values outside int range clamp to a full ring re-read. An
 obstruction map is accepted only as a coherent bounded grid — 1 ≤ rows,cols
 ≤ 256, exactly rows·cols delivered cells, every raw cell finite and, once
 rounded, in [-1, 1] — its reply is capped at 1 MiB per call, the refresh
-clock advances on every attempt, and a refusal is logged with its reason and
+clock advances on every attempt, and a refusal is printed with its reason
+(without `-v`, once per distinct reason) and
 keeps the last accepted map (ObsMap.qml additionally refuses incoherent
 grids). Dish-reported outages are kept to the newest 100 by start time;
 their starts are accepted only within the freshness window (never

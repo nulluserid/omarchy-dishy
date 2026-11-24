@@ -267,7 +267,9 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 	// replaces the last one — last-good-wins, the rule the state files follow
 	// ("a hostile value must not replace previously written state"). A
 	// switch clears the map explicitly, so nothing of the old dish's
-	// survives here. A validation refusal is logged with its reason.
+	// survives here. A validation refusal is printed with its reason —
+	// with or without -v, once per reason until it changes or a map is
+	// accepted again.
 	if active && now.Sub(d.lastMap) >= d.cfg.mapInterval {
 		m := d.fetch(now, &api.Request{Request: &api.Request_DishGetObstructionMap{DishGetObstructionMap: &dish.DishGetObstructionMapRequest{}}},
 			grpc.MaxCallRecvMsgSize(maxObsMapRecvBytes))
@@ -276,8 +278,17 @@ func (d *daemon) goodTick(now time.Time, s *dish.DishGetStatusResponse, active, 
 		switch {
 		case om != nil:
 			d.mapData = om
+			d.lastMapWhy = ""
 		case m != nil: // a failed RPC was already logged by fetch
-			d.warn("obstruction_map: rejected (" + why + ")")
+			// Printed unconditionally: the shipped unit runs without -v, and
+			// behind warn the reason never reached a default install's
+			// journal. Bounded on its own key — warn's is cleared by every
+			// good status tick, so a continuing refusal repeated on each
+			// attempt there.
+			if why != d.lastMapWhy {
+				fmt.Fprintf(osStderr, "starlinkd: obstruction_map: rejected (%s)\n", why)
+				d.lastMapWhy = why
+			}
 		}
 	}
 
