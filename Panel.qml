@@ -411,19 +411,18 @@ Panel {
                 width: parent.width
                 height: Math.max(latTitle.implicitHeight, latValue.implicitHeight)
 
-                Text {
+                PanelSectionHeader {
                   id: latTitle
-                  text: "LATENCY"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+                  text: "Latency"
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  anchors.left: parent.left
                 }
 
                 Text {
                   id: latValue
                   anchors.right: parent.right
+                  anchors.baseline: latTitle.baseline
                   text: Model.fmtMs(root.hasData && s.live ? s.live.latencyMs : null)
                   textFormat: Text.PlainText
                   color: root.fg
@@ -470,19 +469,18 @@ Panel {
                 width: parent.width
                 height: Math.max(thrTitle.implicitHeight, thrValue.implicitHeight)
 
-                Text {
+                PanelSectionHeader {
                   id: thrTitle
-                  text: "THROUGHPUT"
-                  textFormat: Text.PlainText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: true
+                  text: "Throughput"
+                  foreground: root.fg
+                  fontFamily: root.fontFamily
+                  anchors.left: parent.left
                 }
 
                 Text {
                   id: thrValue
                   anchors.right: parent.right
+                  anchors.baseline: thrTitle.baseline
                   text: root.hasData && s.live
                     ? "↓" + Model.fmtMbps(s.live.downMbps) + " ↑" + Model.fmtMbps(s.live.upMbps)
                     : ""
@@ -535,7 +533,7 @@ Panel {
 
             GraphSection {
               width: root.hasPower ? (parent.width - parent.spacing) / 2 : parent.width
-              title: "TODAY"
+              title: "Today"
               valueText: root.hasData && s.live && s.live.typicalDownMbps !== null && s.live.typicalDownMbps !== undefined
                 ? Model.fmtMbps(s.live.typicalDownMbps)
                 : (root.dayPeak !== null ? "peak " + Model.fmtMbps(root.dayPeak) : "—")
@@ -547,7 +545,7 @@ Panel {
             GraphSection {
               visible: root.hasPower
               width: (parent.width - parent.spacing) / 2
-              title: "POWER"
+              title: "Power"
               valueText: Model.fmtW(root.hasData && s.live ? s.live.powerW : null)
               series: Model.decimate(h ? h.powerW : [], width)
               autoScale: true
@@ -565,16 +563,15 @@ Panel {
               width: parent.width
               spacing: Style.space(6)
 
-              Text {
-                text: "OUTAGES"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                id: outTitle
+                text: "Outages"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Text {
+                anchors.baseline: outTitle.baseline
                 text: h && h.outages ? h.outages.length + " recent" : ""
                 textFormat: Text.PlainText
                 color: root.dim
@@ -613,13 +610,10 @@ Panel {
               width: parent.width * 0.55 - parent.spacing / 2
               spacing: Style.space(3)
 
-              Text {
-                text: "OBSTRUCTION"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                text: "Obstruction"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Row {
@@ -666,13 +660,10 @@ Panel {
               width: parent.width * 0.45 - parent.spacing / 2
               spacing: Style.space(3)
 
-              Text {
-                text: "CONNECTION"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+              PanelSectionHeader {
+                text: "Connection"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Column {
@@ -774,14 +765,11 @@ Panel {
             Row {
               spacing: Style.space(8)
 
-              Text {
+              PanelSectionHeader {
                 anchors.verticalCenter: parent.verticalCenter
-                text: "CONTROLS"
-                textFormat: Text.PlainText
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                font.bold: true
+                text: "Controls"
+                foreground: root.fg
+                fontFamily: root.fontFamily
               }
 
               Repeater {
@@ -891,19 +879,18 @@ Panel {
       width: parent.width
       height: Math.max(gsTitle.implicitHeight, gsValue.implicitHeight)
 
-      Text {
+      PanelSectionHeader {
         id: gsTitle
         text: gs.title
-        textFormat: Text.PlainText
-        color: root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
+        foreground: root.fg
+        fontFamily: root.fontFamily
+        anchors.left: parent.left
       }
 
       Text {
         id: gsValue
         anchors.right: parent.right
+        anchors.baseline: gsTitle.baseline
         text: gs.valueText
         textFormat: Text.PlainText
         color: root.fg
