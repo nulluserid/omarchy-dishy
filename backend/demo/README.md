@@ -61,13 +61,14 @@ Variables:
 | `NOTIFY` | Default: the daemon runs with an empty `PATH` and finds no `notify-send`. `on` leaves your `PATH` for it. |
 | `LIVE_ACK=yes` | "`up` may publish into the real runtime directory." Needs `LIVE_RESTORE`. |
 | `LIVE_RESTORE` | The Dish address the widget shows right now, echoed in the notice and by `down`. |
-| `SANDBOX=yes` | "`XDG_RUNTIME_DIR` is a sandbox" (not the real `/run/user/<uid>`): no live shell is involved, no notice. |
+| `SANDBOX=yes` | "`XDG_RUNTIME_DIR` is a sandbox" (not the real `/run/user/<uid>`, judged by directory identity: another name for that directory does not count): no live shell is involved, no notice. |
 | `STATE_LINK` | Where a newer daemon publishes its state-dir link. Default `$XDG_RUNTIME_DIR/starlinkd`. |
 
 `up` starts nothing while, among other things, any of these holds: no
 acknowledgement, something already answering on
-`$XDG_RUNTIME_DIR/starlinkd.sock` (the real daemon, or an earlier demo run), a
-demo port in use, no `DAEMON`, `RUN` inside the repository.
+`$XDG_RUNTIME_DIR/starlinkd.sock` (the real daemon, or an earlier demo run —
+matched as the socket file, whatever name its directory was reached
+through), a demo port in use, no `DAEMON`, `RUN` inside the repository.
 
 Daemon modes: a daemon that knows `-geo-url` (and with it the
 `STARLINKD_STATE_DIR` override and the published state-dir link) runs in

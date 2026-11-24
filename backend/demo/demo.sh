@@ -31,10 +31,16 @@ tcp_listeners() { # listening TCP sockets on port $1
     ss -H -ltn "sport = :$1" || die "ss failed"
 }
 
-sock_listening() { # is anything listening on the unix socket path $1?
-    local out
+sock_listening() { # is anything listening on the unix socket at path $1?
+    # By file identity, not by the spelling in the kernel's table: the table
+    # holds the path a socket was bound under, and the same file reached
+    # through another name for its runtime directory is still that listener.
+    local out p
     out=$(ss -H -xl) || die "ss failed"
-    awk -v p="$1" '$5 == p { f = 1 } END { exit !f }' <<< "$out"
+    while IFS= read -r p; do
+        [ "$p" -ef "$1" ] && return 0
+    done < <(awk '{print $5}' <<< "$out")
+    return 1
 }
 
 # ---- processes ----
@@ -81,8 +87,13 @@ ack_live_or_sandbox() {
         *) die "nothing was started: set LIVE_ACK=yes to take the live shell over, or SANDBOX=yes when XDG_RUNTIME_DIR is a sandbox" ;;
     esac
     if [ "$live" = 0 ]; then
-        [ "$XDG_RUNTIME_DIR" != "/run/user/$(id -u)" ] \
-            || die "SANDBOX=yes, but XDG_RUNTIME_DIR is the real runtime directory: use LIVE_ACK=yes"
+        # Directory identity, not spelling: the real runtime directory is
+        # still the real one through a trailing slash, a symlink or a longer
+        # path, and SANDBOX=yes would then aim the state-dir link at the
+        # live widget. -ef compares device and inode, so both sides count
+        # as resolved however they are written.
+        [ "$XDG_RUNTIME_DIR" -ef "/run/user/$(id -u)" ] \
+            && die "SANDBOX=yes, but XDG_RUNTIME_DIR is the real runtime directory: use LIVE_ACK=yes"
         echo 0
         return 0
     fi
