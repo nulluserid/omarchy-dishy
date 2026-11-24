@@ -815,7 +815,7 @@ func (d *daemon) buildStatus(now time.Time, s *dish.DishGetStatusResponse, state
 		},
 		Link: d.link,
 	}
-	if d.geo.Ts > 0 {
+	if geoPublishable(d.geo, now) {
 		g := d.geo
 		sf.Geo = &g
 	}
@@ -856,7 +856,7 @@ func (d *daemon) buildStatusFail(now time.Time, msg string) *statusFile {
 		SessionPct: pct(d.sessionOnlineS, d.sessionS),
 	}
 	sf.Link = d.link
-	if d.geo.Ts > 0 {
+	if geoPublishable(d.geo, now) {
 		g := d.geo
 		sf.Geo = &g
 	}

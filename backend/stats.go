@@ -19,7 +19,7 @@ import (
 const (
 	maxDishStrRunes    = 64 // device id, hardware and software version
 	maxRPCErrorRunes   = 200
-	maxGeoIPRunes      = 64
+	maxGeoIPRunes      = 64  // a refused address, quoted in the lookup's error; a published one is a parsed IPv4
 	maxGeoTextRunes    = 128 // city, region, carrier org
 	maxGeoCountryRunes = 16
 	maxGeoASNRunes     = 32
@@ -31,8 +31,9 @@ const (
 // the bidi overrides U+202A–U+202E and U+2066–U+2069 that can make a label
 // read backwards, zero-width marks) — plus invalid UTF-8, never splitting a
 // rune. It truncates rather than rejects — the surrounding answer still
-// stands, the string is just hostile-sized. (The obstruction map is the
-// exception that is rejected whole: a truncated sky would be a lie.)
+// stands, the string is just hostile-sized. (The obstruction map and the
+// egress address are the exceptions that are rejected whole: a truncated sky
+// would be a lie, and so would a clipped address.)
 func clip(s string, max int) string {
 	invisible := func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }
 	if len(s) <= max && utf8.ValidString(s) && !strings.ContainsFunc(s, invisible) {
