@@ -33,7 +33,8 @@ Retention (2026-10-30): a dish partition with no connection activity for
 30 days is deleted whole (counters + day history) at the next startup or
 local day roll. Connection evidence is daily.json's `lastSeen` (written
 only by identity-verified good ticks) extended by the newest day-*.json
-date; when no stamp exists (≤ v1.4 files, drive-bys) file mtime is used,
+date; when no stamp exists (≤ v1.4 files, drive-bys, or a daily.json that
+does not read — corrupt or over the 16 KiB cap) file mtime is used,
 and `loadDaily` seeds the stamp from mtime so an adopted legacy dish ages
 out from load time even though later writes rewrite the file. Kept
 partitions roll their day files through the same 30-day window (see

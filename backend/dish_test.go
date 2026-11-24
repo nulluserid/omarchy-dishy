@@ -384,6 +384,19 @@ func TestTidyDishes(t *testing.T) {
 	}
 	os.Chtimes(filepath.Join(keptOldMtime, "daily.json"), old, old)
 
+	// The sweep reads daily.json capped, like loadDaily (CONTRACT.md: 16
+	// KiB). A larger file was not written by this daemon, so a fresh stamp
+	// inside it counts for nothing and its mtime decides, as for any
+	// unreadable file: here idle 40 days, so swept. Read whole, the stamp
+	// would have kept the partition. The valid JSON comes first and the
+	// padding after it, so only the size can refuse it.
+	oversize := mk("ut-oversize", old, "")
+	oversizeJSON := `{"lastSeen":` + strconv.FormatInt(t0.Unix(), 10) + `}` + strings.Repeat(" ", int(maxDailyBytes))
+	if err := os.WriteFile(filepath.Join(oversize, "daily.json"), []byte(oversizeJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(filepath.Join(oversize, "daily.json"), old, old)
+
 	// Legacy root day files share the retention.
 	legacy := filepath.Join(dir, "day-"+oldDay+".json")
 	if err := os.WriteFile(legacy, []byte("{}"), 0o644); err != nil {
@@ -396,7 +409,7 @@ func TestTidyDishes(t *testing.T) {
 
 	d.tidyDishes(t0)
 
-	for _, id := range []string{"ut-stale", "ut-mtdonly", "ut-freshmtime"} {
+	for _, id := range []string{"ut-stale", "ut-mtdonly", "ut-freshmtime", "ut-oversize"} {
 		if _, err := os.Stat(filepath.Join(dir, "dishes", id)); !os.IsNotExist(err) {
 			t.Errorf("partition %s not swept", id)
 		}

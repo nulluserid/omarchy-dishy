@@ -285,11 +285,14 @@ func (d *daemon) evictPartitions(now time.Time) {
 // partitionLastActivity is the newest connection evidence in a dish
 // partition: daily.json's lastSeen stamp (good-tick only), the day after
 // the newest day file's date, or — for pre-stamp files — daily.json's
-// mtime, whichever is later.
+// mtime, whichever is later. daily.json is read capped, like every load
+// (loadDaily; CONTRACT.md "Security hardening"): a file over the cap was
+// not written by this daemon, so its stamp counts for nothing and it takes
+// the unreadable-file fallback, the mtime.
 func partitionLastActivity(dir string) time.Time {
 	var last time.Time
 	haveStamp := false
-	if b, err := os.ReadFile(filepath.Join(dir, "daily.json")); err == nil {
+	if b, err := readCapped(filepath.Join(dir, "daily.json"), maxDailyBytes); err == nil {
 		var df dailyFile
 		if json.Unmarshal(b, &df) == nil && df.LastSeen > 0 {
 			last = time.Unix(df.LastSeen, 0)
@@ -297,8 +300,8 @@ func partitionLastActivity(dir string) time.Time {
 		}
 	}
 	if !haveStamp {
-		// Pre-stamp file or unreadable daily.json: mtime is the best
-		// remaining signal (pre-1.5 partitions and drive-bys).
+		// Pre-stamp file, or an unreadable or oversize daily.json: mtime is
+		// the best remaining signal (pre-1.5 partitions and drive-bys).
 		if fi, err := os.Stat(filepath.Join(dir, "daily.json")); err == nil {
 			last = fi.ModTime()
 		}
