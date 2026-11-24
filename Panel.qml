@@ -50,6 +50,22 @@ Panel {
     : Qt.hsla(0, 0, Commons.Color.muted.hslLightness, 1)
   readonly property bool hasData: s !== null && !sStale
 
+  // The header's alert row, as chips: the alert labels that fit beside the
+  // title, "+N more" for the rest, then the update notice (Model.fitChips).
+  // Measured with the chip's own font, so what it counts as fitting is what
+  // the chips draw; the room is the header less the glyph and the title.
+  readonly property var alertChips: Model.fitChips(
+    Model.allAlertLabels(s), Model.updateNotice(s),
+    function(text) { return chipFont.advanceWidth(text) },
+    header.width - (heroGlyph.width + Style.space(14) + heroTitle.implicitWidth) - Style.space(10),
+    Style.spacing.sm, Style.space(6))
+
+  FontMetrics {
+    id: chipFont
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.bodySmall
+  }
+
   // hist.json: parsed only while open; null = unreadable, oversize or
   // malformed.
   // map is its obstruction map after Model.validMap (null when absent or
@@ -268,137 +284,113 @@ Panel {
           width: dashScroll.width
           spacing: Style.space(6)
 
-          // ---- Header: state chip + identity (80s-readout dense) ----
-          Row {
-            id: headerRow
+          // ---- Header: hero (glyph · title · status · identity), alerts at right ----
+          Item {
+            id: header
             width: parent.width
-            spacing: Style.space(10)
+            implicitHeight: heroLabels.implicitHeight
 
-            Rectangle {
-              id: stateChip
-              implicitWidth: stateRow.implicitWidth + Style.space(16)
-              implicitHeight: Style.space(30)
-              radius: Style.space(5)
-              color: Qt.rgba(root.stateColor.r, root.stateColor.g, root.stateColor.b, 0.12)
-              border.width: 1
-              border.color: root.stateColor
-
-              Row {
-                id: stateRow
-                anchors.centerIn: parent
-                spacing: Style.space(7)
-
-                Rectangle {
-                  anchors.verticalCenter: parent.verticalCenter
-                  width: Style.space(8)
-                  height: width
-                  radius: height / 2
-                  color: root.stateColor
-                }
-
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: root.hasData ? Model.titleCase(s.state) : "NO DATA"
-                  textFormat: Text.PlainText
-                  color: root.fg
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                }
-              }
+            Text {
+              id: heroGlyph
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              textFormat: Text.PlainText
+              text: Model.GLYPH
+              color: root.stateColor
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.display
             }
 
             Column {
+              id: heroLabels
+              anchors.left: heroGlyph.right
+              anchors.leftMargin: Style.space(14)
+              anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
-              width: headerRow.width - stateChip.implicitWidth - headerRow.spacing
-              spacing: 0
+              spacing: Style.space(2)
 
-              Text {
-                text: root.hasData
-                  ? "up " + Model.humanDur(s.dish ? s.dish.uptimeS : null)
-                    + " · GPS " + (s.gps && s.gps.valid ? s.gps.sats : "—")
-                    + " · eth " + Model.fmtMbps(s.dish ? s.dish.ethMbps : null)
-                  : ""
-                textFormat: Text.PlainText
-                color: root.fg
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
+              // As tall as an alert chip whether or not one is showing, so
+              // the bands below never move when alerts set or clear.
+              Item {
+                width: parent.width
+                implicitHeight: Math.max(heroTitle.implicitHeight, heroIdentity.implicitHeight + Style.space(6))
+
+                Text {
+                  id: heroTitle
+                  anchors.left: parent.left
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "Starlink"
+                  elide: Text.ElideRight
+                  width: Math.max(0, Math.min(implicitWidth, parent.width - alertRow.width - Style.space(10)))
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+
+                // One line that never wraps: the alerts that fit beside the
+                // title, "+N more" for the rest, then the update notice.
+                Row {
+                  id: alertRow
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.spacing.sm
+
+                  Repeater {
+                    model: root.alertChips
+
+                    Rectangle {
+                      required property string modelData
+                      width: chipFont.advanceWidth(modelData) + 2 * Style.space(6)
+                      implicitHeight: chipLabel.implicitHeight + Style.space(6)
+                      radius: height / 2
+                      color: "transparent"
+                      border.width: 1
+                      border.color: Model.WARN_HEX
+
+                      Text {
+                        id: chipLabel
+                        anchors.fill: parent
+                        anchors.leftMargin: Style.space(6)
+                        anchors.rightMargin: Style.space(6)
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                        textFormat: Text.PlainText
+                        text: modelData
+                        // The last resort, for a notice longer than the row.
+                        elide: Text.ElideRight
+                        color: Model.WARN_HEX
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                      }
+                    }
+                  }
+                }
               }
 
               Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: Model.headerSegments(root.hasData ? s : null).join(" · ").toUpperCase()
+                elide: Text.ElideRight
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                font.letterSpacing: 1.2
+              }
+
+              Text {
+                id: heroIdentity
+                width: parent.width
                 text: root.hasData && s.dish
                   ? String(s.dish.id || "").substring(0, 8) + " · " + (s.dish.hw || "—")
                     + " · " + String(s.dish.sw || "—").split(".").slice(0, 3).join(".")
                   : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
-                width: Math.min(implicitWidth, headerRow.width - stateChip.implicitWidth - headerRow.spacing)
                 color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-              }
-            }
-          }
-
-          // ---- Alert + update chips ----
-          Flow {
-            width: parent.width
-            spacing: Style.space(5)
-
-            Repeater {
-              // Capped (Model.MAX_ALERTS): the chips are rebuilt on every tick.
-              model: root.hasData ? Model.alertList(s) : []
-
-              Rectangle {
-                required property var modelData
-                implicitWidth: chipLabel.implicitWidth + Style.space(12)
-                implicitHeight: chipLabel.implicitHeight + Style.space(6)
-                radius: height / 2
-                color: "transparent"
-                border.width: 1
-                border.color: Model.WARN_HEX
-
-                Text {
-                  id: chipLabel
-                  anchors.centerIn: parent
-                  text: modelData && modelData.label ? String(modelData.label) : "alert"
-                  textFormat: Text.PlainText
-                  color: Model.WARN_HEX
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
-            }
-
-            // Software update / state detail chip.
-            Rectangle {
-              visible: root.hasData && updateText !== ""
-              implicitWidth: updateLabel.implicitWidth + Style.space(12)
-              implicitHeight: updateLabel.implicitHeight + Style.space(6)
-              radius: height / 2
-              color: "transparent"
-              border.width: 1
-              border.color: Model.WARN_HEX
-
-              readonly property string updateText: {
-                if (!root.hasData) return ""
-                var u = s.update || {}
-                if (u.state === "REBOOT_REQUIRED") return "Software update — reboot required"
-                if (u.state === "FETCHING" || u.state === "WRITING")
-                  return "Software update — " + Model.fmtPct(u.progressPct * 100, 0)
-                if (u.state === "FAULTED") return "Software update — faulted"
-                var det = String(s.stateDetail || "")
-                if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
-                  return Model.titleCase(det)
-                return ""
-              }
-
-              Text {
-                id: updateLabel
-                anchors.centerIn: parent
-                text: parent.updateText
-                textFormat: Text.PlainText
-                color: Model.WARN_HEX
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }

@@ -35,6 +35,13 @@ var MAX_MAP_DIM = 256
 // tooltip, bar level, the panel's chips — from scaling with file content.
 var MAX_ALERTS = 64
 
+// Alert labels the panel's row and the bar tooltip name before the rest fold
+// into one "+N more".
+var MAX_ROW_LABELS = 3
+
+// The satellite glyph the bar widget and the panel's header share.
+var GLYPH = "\udb86\udc80"  // nf-md-satellite_uplink
+
 function parse(text) {
   try {
     var d = JSON.parse(String(text))
@@ -111,6 +118,45 @@ function actionAlertLabels(status) {
   return out
 }
 
+// The panel's alert row as one line that never wraps: the first alert labels,
+// "+N more" for the rest, then the update notice, taking alert labels only
+// while everything fits in width. measure(text) gives a label's width in the
+// chip's font, gap the space between chips and pad the space on each side of
+// a label. At most MAX_ROW_LABELS labels are named however wide the row, and
+// an alert never pushes the notice out. Returns the chip texts in display
+// order — nothing when there is nothing to show. A notice too long for the
+// row is returned anyway: the caller's elide is the last resort.
+function fitChips(labels, updateText, measure, width, gap, pad) {
+  var list = Array.isArray(labels) ? labels : []
+  var n = list.length
+  var notice = updateText ? [String(updateText)] : []
+  var take = Math.min(n, MAX_ROW_LABELS)
+  for (;;) {
+    var chips = list.slice(0, take)
+    if (n > take) chips.push("+" + (n - take) + " more")
+    chips = chips.concat(notice)
+    var w = gap * Math.max(0, chips.length - 1)
+    for (var i = 0; i < chips.length; i++) w += measure(chips[i]) + pad * 2
+    if (w <= width || take === 0) return chips
+    take -= 1
+  }
+}
+
+// The one notice a software update or a disablement state raises, worded the
+// same on the panel's alert row and in the bar tooltip.
+function updateNotice(status) {
+  if (!status) return ""
+  var u = status.update || {}
+  if (u.state === "REBOOT_REQUIRED") return "Update — reboot required"
+  if (u.state === "FETCHING" || u.state === "WRITING")
+    return "Update — " + fmtPct(u.progressPct * 100, 0)
+  if (u.state === "FAULTED") return "Update — faulted"
+  var det = String(status.stateDetail || "")
+  if (det !== "" && det !== "SOFTWARE_UPDATE_REBOOT_PENDING")
+    return titleCase(det)
+  return ""
+}
+
 // good = ONLINE with no attention-worthy alert, warn = SEARCHING/BOOTING or
 // any action-worthy dish alert or reboot-required/disablement detail, bad =
 // NO_SIGNAL/THERMAL/OFFLINE, none = NO_DATA.
@@ -169,6 +215,30 @@ function fmtGB(v) {
 function fmtPct(v, decimals) {
   var n = num(v)
   return n === null ? "—" : n.toFixed(decimals === undefined ? 1 : decimals) + "%"
+}
+
+// The panel header's status line as segments, in order: state, uptime,
+// satellite count, interface speed. A segment the dish gave no reading for
+// is left out together with its separator. The daemon publishes proto3
+// defaults for whatever the dish did not report — an uptime of 0, which its
+// own BOOTING test reads the same way; an interface speed of 0; and on
+// firmware 2026.11.09 no GPS fields at all, only `valid: false, sats: 0` —
+// and those would otherwise print as a permanent "0s" or dash. Join with the
+// separator of your choice; [] when there is no status.
+function headerSegments(status) {
+  var out = []
+  if (!status) return out
+  var st = titleCase(status.state)
+  if (st) out.push(st)
+  var dish = status.dish
+  var up = dish ? num(dish.uptimeS) : null
+  if (up !== null && up > 0) out.push("up " + humanDur(up))
+  var gps = status.gps
+  var sats = gps && gps.valid ? num(gps.sats) : null
+  if (sats !== null && sats > 0) out.push("GPS " + sats + " sats")
+  var eth = dish ? num(dish.ethMbps) : null
+  if (eth !== null && eth > 0) out.push("eth " + fmtMbps(eth))
+  return out
 }
 
 // Nearest-rank percentile over non-null entries; null when no data.

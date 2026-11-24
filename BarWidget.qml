@@ -21,7 +21,7 @@ BarWidget {
   id: root
   moduleName: "io.github.nulluserid.dishy"
 
-  readonly property string glyph: "\udb86\udc80"  // nf-md-satellite_uplink
+  readonly property string glyph: Model.GLYPH  // nf-md-satellite_uplink, shared with the panel header
 
   // The daemon honors XDG_STATE_HOME: a service on another state dir updates
   // fine while a hardcoded ~/.local/state path shows nothing. It also
