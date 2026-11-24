@@ -836,6 +836,67 @@ func TestToObsMapRejectsIncoherentGrid(t *testing.T) {
 	}
 }
 
+func TestMapRefusalLoggedOncePerReason(t *testing.T) {
+	// The reason has to reach the journal of a default install: the shipped
+	// unit passes no -v, and behind warn the line was verbose-only — and
+	// since every good status tick reset warn's key, with -v a continuing
+	// refusal repeated on every attempt. It is printed unconditionally now,
+	// bounded: once per distinct reason, until the reason changes or a map
+	// is accepted again.
+	log := filepath.Join(t.TempDir(), "stderr")
+	f, err := os.OpenFile(log, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	realStderr := osStderr
+	osStderr = f
+	t.Cleanup(func() { osStderr = realStderr; f.Close() })
+
+	// verbose stays false: the default, and what the shipped unit runs with.
+	c := mkStub()
+	d := newDaemon(config{
+		interval: 2 * time.Second, idleInterval: 10 * time.Second,
+		idleHistInterval: time.Minute, mapInterval: time.Minute,
+		geoInterval: time.Hour, geoTransitionInterval: time.Hour, dir: t.TempDir(),
+	}, c)
+	d.startWall = t0.Add(-time.Hour)
+	at := t0
+	attempt := func(res *dish.DishGetObstructionMapResponse) string { // one dashboard tick with the map due
+		c.mapRes = res
+		d.goodTick(at, c.status, true, false, 2*time.Second)
+		at = d.lastMap.Add(d.cfg.mapInterval).Add(time.Second)
+		b, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	zeroRows := &dish.DishGetObstructionMapResponse{}
+	shortGrid := &dish.DishGetObstructionMapResponse{NumRows: 4, NumCols: 4, Snr: []float32{1, 2, 3}}
+	grid := &dish.DishGetObstructionMapResponse{NumRows: 4, NumCols: 4, Snr: make([]float32, 16)}
+	const whyRows = "starlinkd: obstruction_map: rejected (rows 0 < 1)\n"
+	const whyCells = "starlinkd: obstruction_map: rejected (3 cells, want rows*cols = 16)\n"
+	for _, tc := range []struct {
+		name string
+		res  *dish.DishGetObstructionMapResponse
+		want string // the whole of stderr so far: nothing but refusal lines
+	}{
+		{"first refusal", zeroRows, whyRows},
+		{"the same refusal again", zeroRows, whyRows},
+		{"another reason", shortGrid, whyRows + whyCells},
+		{"that reason again", shortGrid, whyRows + whyCells},
+		{"a map is accepted", grid, whyRows + whyCells},
+		{"re-armed: the first reason again", zeroRows, whyRows + whyCells + whyRows},
+	} {
+		if got := attempt(tc.res); got != tc.want {
+			t.Errorf("%s: stderr = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if d.mapData == nil || d.mapData.Rows != 4 {
+		t.Fatalf("accepted map not kept across the refusals: %+v", d.mapData)
+	}
+}
+
 func TestFailTickNotifyWarmGate(t *testing.T) {
 	// Cold start against an unreachable dish: no notification spam. After the
 	// first good tick (warm), a fresh outage notifies.

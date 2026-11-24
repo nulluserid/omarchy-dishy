@@ -33,7 +33,8 @@ Retention (2026-10-30): a dish partition with no connection activity for
 30 days is deleted whole (counters + day history) at the next startup or
 local day roll. Connection evidence is daily.json's `lastSeen` (written
 only by identity-verified good ticks) extended by the newest day-*.json
-date; when no stamp exists (≤ v1.4 files, drive-bys) file mtime is used,
+date; when no stamp exists (≤ v1.4 files, drive-bys, or a daily.json that
+does not read — corrupt or over the 16 KiB cap) file mtime is used,
 and `loadDaily` seeds the stamp from mtime so an adopted legacy dish ages
 out from load time even though later writes rewrite the file. Kept
 partitions roll their day files through the same 30-day window (see
@@ -97,8 +98,8 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
 - `stateDetail`: `SOFTWARE_UPDATE_REBOOT_PENDING` | disablementCode when ≠ OKAY | `""`
 - `dish.dir`: name of the per-dish partition actually being written (`dishes/<dir>/`), derived from the adopted `dish.id` — never from an id that is only pending in the identity debounce, and absent until an identity is known (the state root is written then). Consumers use it instead of re-deriving the name: the daemon's rule (lowercase, [a-z0-9._-], 64 bytes) and a re-implementation disagree on non-ASCII ids.
 - Clipping (v5): `dish.id`, `hw` and `sw` are cut to 64 runes and `error` to
-  200; `geo.ip` to 64, `geo.city`/`region`/`org` to 128, `geo.country` to 16,
-  `geo.asn` to 32. Control characters (Unicode Cc), format characters (Cf)
+  200; `geo.city`/`region`/`org` to 128, `geo.country` to 16, `geo.asn` to
+  32. Control characters (Unicode Cc), format characters (Cf)
   and invalid UTF-8 are dropped from every dish- and egress-derived string
   before the cap counts. The same clipped strings are what reach config.json,
   events.jsonl and notifications ("Security hardening").
@@ -124,7 +125,8 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
   reason, never the grace hold). `since` = unix s of the last `onStarlink`
   flip; `lastDishOK` = unix s of the last successful GetStatus. Missing
   `link` block (v1 daemon): consumers must default to visible.
-- `geo` (v2, omitted until the first lookup): egress info from
+- `geo` (v2, omitted until the first lookup — and again once the last result
+  is 15 min old): egress info from
   `https://ifconfig.co/json` (`-geo-url` overrides the endpoint) — public IP,
   approximate exit city/region/country, carrier (`asn`, `asn_org`), and
   `isStarlink` (AS14593 or SpaceX/Starlink org string). Refresh: 5 min
@@ -137,8 +139,14 @@ and day-*.json live per dish in `dishes/<dish-id>/` there):
   `egress-other`) is asked every 5 min, not every minute. After a failed
   lookup nothing is retried for 5 min, except that a default-route flip still
   looks up on the next tick; the next success ends the backoff. The egress
-  lookup dials IPv4 only, so the address and exit location shown are the IPv4
-  ones; with no IPv4 route the lookup fails and there is no egress line. No
+  lookup dials IPv4 only and accepts only an IPv4 address: an answer whose
+  `ip` is anything else — IPv6, malformed, missing — is a failed lookup, and
+  `geo.ip` is always a parsed IPv4 address (the other fields are clipped).
+  Last-good is bounded: a failed lookup keeps the previous result, but one
+  older than 15 minutes without a successful lookup is no longer published —
+  the block is omitted and the egress line goes away rather than show an
+  address the machine has left. With no IPv4 route the lookup fails, so once
+  the last answer is 15 minutes old there is no egress line. No
   API key. Lookups run off the tick path, and results are stamped when the
   request is launched — the answer describes the network as of then, so a
   lookup in flight during a route change can never pass for a post-change
@@ -176,7 +184,9 @@ All five series arrays have exactly `n` entries, oldest→newest, 1s apart.
 
 - `map` (v5): rows and cols each 1..256, exactly rows·cols cells, each a
   finite raw value that rounds into [-1, 1] (0..1 per cell, -1 = no data).
-  Anything else refuses the map whole, logged once per distinct reason; the
+  Anything else refuses the map whole and prints the reason on stderr
+  (journald under systemd) with or without `-v` — once per distinct reason,
+  until the reason changes or a map is accepted again; the
   DishGetObstructionMap reply is capped at 1 MiB per call. Refreshed every
   60 s while the dashboard is open; a refused or failed attempt also waits
   60 s, and the last accepted map is kept.
@@ -427,7 +437,8 @@ un-stoppable — and the timeout is a uniform 15 minutes.
 - `-idle-hist-interval`: background history refresh while closed (default 60 s).
 - `-map-interval`: obstruction map refresh (dashboard open only).
 - `-once`: single tick, write files, print status.json to stdout, exit.
-- `-v`: log transitions + errors to stderr (journald under systemd).
+- `-v`: log transitions + errors to stderr (journald under systemd). A refused
+  obstruction map's reason is printed without it (see `hist.json`).
 - `-idle-exit <duration>`: exit cleanly (status 0) once no control-socket
   command arrived for this long (default 0 = never; the service unit passes
   `15m`).
@@ -449,7 +460,8 @@ history-array values outside int range clamp to a full ring re-read. An
 obstruction map is accepted only as a coherent bounded grid — 1 ≤ rows,cols
 ≤ 256, exactly rows·cols delivered cells, every raw cell finite and, once
 rounded, in [-1, 1] — its reply is capped at 1 MiB per call, the refresh
-clock advances on every attempt, and a refusal is logged with its reason and
+clock advances on every attempt, and a refusal is printed with its reason
+(without `-v`, once per distinct reason) and
 keeps the last accepted map (ObsMap.qml additionally refuses incoherent
 grids). Dish-reported outages are kept to the newest 100 by start time;
 their starts are accepted only within the freshness window (never
@@ -459,25 +471,29 @@ Dish-identity switches are debounced to 2 consecutive identical answers
 with least-recently-active eviction.
 
 Strings: the dish's device id / hardware / software strings, the RPC error
-text and every egress field are the peers' to size, and the bar re-parses
-status.json every 2 s even with the panel closed — so each is clipped, never
-copied whole. The cap is 64 runes for `dish.id`, `hw` and `sw` (real values:
-26, 17, 18); 200 for the RPC error, the whole "code: message", in `error`
-and in the control subcommands' stderr, which the panel displays; and for
-the egress fields `geo.ip` 64, `geo.city`/`region`/`org` 128, `geo.country`
-16, `geo.asn` 32 — counted after dropping control and format characters
+text and the egress provider's text fields are the peers' to size, and the
+bar re-parses status.json every 2 s even with the panel closed — so each is
+clipped, never copied whole. The cap is 64 runes for `dish.id`, `hw` and `sw`
+(real values: 26, 17, 18); 200 for the RPC error, the whole "code: message",
+in `error` and in the control subcommands' stderr, which the panel displays;
+and for the egress fields `geo.city`/`region`/`org` 128, `geo.country` 16,
+`geo.asn` 32 — counted after dropping control and format characters
 (Unicode Cc, Cf: bidi overrides, zero-width marks) and invalid UTF-8, never
 splitting a rune. Clipping truncates, it does not reject: the surrounding
-answer stands. The clipped id is the only id the daemon ever uses — the
-identity comparison, `dish.id`, config.json `lastDish` (written and read),
+answer stands. The one exception is the egress address, which is validated
+instead and never clipped ("Egress lookup"). The clipped id is the only id
+the daemon ever uses — the identity comparison, `dish.id`, config.json
+`lastDish` (written and read),
 events.jsonl `dish_switch`, the partition key and the notification text all
 derive from one conversion — so two ids that differ only past the cap are
 one dish.
 
 Egress lookup: the endpoint must be an absolute http or https URL with a
 host (`-geo-url`, validated before anything else runs); the lookup dials
-IPv4 only, reads at most 1 MiB of body, follows no redirect, and backs off
-5 min after a failure ("status.json — geo").
+IPv4 only, reads at most 1 MiB of body, follows no redirect, and publishes
+an address only when the answer's `ip` parses as IPv4 — anything else is a
+failed lookup; the last good result is kept for 15 minutes at most, and
+after a failure nothing is retried for 5 min ("status.json — geo").
 
 Notifications: every notification draws from one bucket — 5 tokens, one back
 per 10 s — whatever fired it, and a dropped one still records its event;

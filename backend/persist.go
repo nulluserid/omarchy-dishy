@@ -129,11 +129,26 @@ func publishStateDir(dir string) error {
 	return nil
 }
 
+// chmodTemp and writeTemp are the two steps of atomicWrite that fail only
+// when the filesystem does: tightening the fresh temp file to 0600, and
+// writing the data. A plain user cannot provoke either on a file they have
+// just created, so they are variables — a test makes one fail to see that
+// the error is returned, never swallowed (TestAtomicWriteFailureKeepsOldFile).
+var (
+	chmodTemp = func(f *os.File) error { return f.Chmod(0o600) }
+	writeTemp = func(f *os.File, data []byte) error {
+		_, err := f.Write(data)
+		return err
+	}
+)
+
 // atomicWrite writes via tmp+rename so consumers never see partial files.
 // The temp file is created fresh under a unique name in the destination
 // directory (0600 by construction), so nothing planted at a predictable name
 // is ever opened or followed; it is renamed into place, and removed whenever
-// any step fails. The name is "<base>.tmp-<random>", which the day-file
+// any step fails. A failed step is returned to the caller and leaves the
+// previous file untouched: only a temp file that was written whole is ever
+// renamed over it. The name is "<base>.tmp-<random>", which the day-file
 // pruning pattern (day-YYYYMMDD.json, exact length) cannot match.
 // Mode 0600: state files carry the machine's public IP and location metadata.
 func atomicWrite(path string, data []byte) error {
@@ -146,8 +161,12 @@ func atomicWrite(path string, data []byte) error {
 		return err
 	}
 	tmp := f.Name()
-	if err := f.Chmod(0o600); err == nil {
-		_, err = f.Write(data)
+	// Plain assignments on purpose: an `if err := …` here scopes its own
+	// err, and a failed step then never reaches the checks below — the
+	// empty or partial temp was renamed over the good file, as success.
+	err = chmodTemp(f)
+	if err == nil {
+		err = writeTemp(f, data)
 	}
 	if closeErr := f.Close(); err == nil {
 		err = closeErr

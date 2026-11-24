@@ -67,9 +67,10 @@ data.
     public IP + approximate exit city/region and carrier — one ifconfig.co
     query every 5 minutes — 60 s only while classifying (no fresh answer
     yet, or right after a route change) — off Starlink too; after a failed
-    lookup nothing is retried for 5 minutes; no API key. The IP check
-    always uses IPv4, so the address and exit location it shows are the
-    IPv4 ones; on an IPv6-only network there is no egress line.
+    lookup nothing is retried for 5 minutes; no API key. The IP check dials
+    IPv4 and accepts only an IPv4 answer, so the address and exit location
+    it shows are the IPv4 ones. A failed lookup keeps the last answer for 15
+    minutes at most; on an IPv6-only network there is then no egress line.
   - one-line usage grid: today / all-time / availability
   - up to three alert chips in the header row ("+N more" for the rest)
     and the software-update state
@@ -202,11 +203,12 @@ mode LANs use 192.168.5.x/10.0.0.x while all of them route the dish address)
 — with a 10-minute grace when there is no evidence at all
 (captive portal, dish outage). The egress lookup asks `ifconfig.co` every 5
 minutes — off Starlink too — and after a failed lookup nothing is retried
-for 5 minutes. The IP check always uses IPv4, so the address and exit
-location it shows are the IPv4 ones; on an IPv6-only network there is no
-egress line. A parked machine costs ~1 KB of status JSON every 10 s and one
-`/proc/net/route` read per tick: no per-tick process spawns, no polling
-threads, no hist writes, no notification spam.
+for 5 minutes. The IP check dials IPv4 and accepts only an IPv4 answer, so
+the address and exit location it shows are the IPv4 ones. A failed lookup
+keeps the last answer for 15 minutes at most; on an IPv6-only network there
+is then no egress line. A parked machine costs ~1 KB of status JSON every
+10 s and one `/proc/net/route` read per tick: no per-tick process spawns, no
+polling threads, no hist writes, no notification spam.
 
 State lives in the daemon's state dir — `$XDG_STATE_HOME/starlinkd`, or
 `~/.local/state/starlinkd/` when that variable is unset: `status.json`

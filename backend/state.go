@@ -301,9 +301,13 @@ type daemon struct {
 	failed             int
 	maxDishOutageStart int64
 
-	mapData  *obsMap
-	lastMap  time.Time
-	lastHist time.Time // last successful history ingest (drives idle cadence)
+	mapData *obsMap
+	lastMap time.Time
+	// lastMapWhy is the refusal reason last printed for the obstruction
+	// map: a reason repeats only once it has changed, or a map has been
+	// accepted again since (goodTick).
+	lastMapWhy string
+	lastHist   time.Time // last successful history ingest (drives idle cadence)
 
 	// Notification token bucket (emit): starts full, refills on the
 	// monotonic clock. Tick-loop-owned like everything else here.

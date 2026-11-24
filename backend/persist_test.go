@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,6 +108,87 @@ func TestAtomicWrite(t *testing.T) {
 		if fi, err := os.Stat(path); err == nil && fi.Mode().Perm() != 0o644 {
 			t.Errorf("%s mode = %o, want 644", path, fi.Mode().Perm())
 		}
+	}
+}
+
+func TestAtomicWriteFailureKeepsOldFile(t *testing.T) {
+	// A failed chmod or write must reach the caller as an error, leave the
+	// previous file's bytes in place and leave no temp file behind — never
+	// publish the empty or partial temp as a successful write. Neither step
+	// can be made to fail on a file its owner just created, so each is
+	// failed through its seam; the write one leaves half of the new bytes
+	// behind first, the way a full disk does.
+	errChmod := errors.New("chmod: operation not permitted")
+	errWrite := errors.New("write: no space left on device")
+	realChmod, realWrite := chmodTemp, writeTemp
+	t.Cleanup(func() { chmodTemp, writeTemp = realChmod, realWrite })
+	const oldBytes, newBytes = "previous bytes", "new bytes, and more of them than before"
+	for _, tc := range []struct {
+		name     string
+		fail     func()
+		wantErr  error  // what the caller must receive; nil: the write succeeds
+		wantFile string // what the file must hold afterwards
+	}{
+		{"failed write", func() {
+			writeTemp = func(f *os.File, data []byte) error {
+				if _, err := f.Write(data[:len(data)/2]); err != nil {
+					return err
+				}
+				return errWrite
+			}
+		}, errWrite, oldBytes},
+		{"failed chmod", func() { chmodTemp = func(*os.File) error { return errChmod } }, errChmod, oldBytes},
+		{"successful write", func() {}, nil, newBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chmodTemp, writeTemp = realChmod, realWrite
+			tc.fail()
+			dir := t.TempDir()
+			p := filepath.Join(dir, "f.json")
+			if err := os.WriteFile(p, []byte(oldBytes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := atomicWrite(p, []byte(newBytes)); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("atomicWrite = %v, want %v", err, tc.wantErr)
+			}
+			if got := readFile(t, p); got != tc.wantFile {
+				t.Fatalf("after the write %s = %q, want %q", p, got, tc.wantFile)
+			}
+			assertMode(t, p, 0o600)
+			// Whatever became of the write, exactly the one file remains.
+			if left, _ := filepath.Glob(filepath.Join(dir, "*")); len(left) != 1 || left[0] != p {
+				t.Errorf("files left behind: %v, want only %s", left, p)
+			}
+		})
+	}
+
+	// The callers act on that error. `set host` with no daemon listening
+	// writes config.json itself and reports the failure; writeDay keeps the
+	// day dirty, so the next window retries it instead of marking the
+	// unwritten samples clean.
+	dir := t.TempDir()
+	if err := writeTargetConfig(dir, "192.168.100.1:9200"); err != nil {
+		t.Fatal(err)
+	}
+	cfg := filepath.Join(dir, configName)
+	d := newDaemon(config{dir: t.TempDir()}, nil)
+	d.feedSample(t0, 10, 1, nil, 0, nil)
+	d.writeDay(t0, true)
+	day := filepath.Join(d.cfg.dir, dayFileName(d.day.file.Date))
+	beforeCfg, beforeDay := readFile(t, cfg), readFile(t, day)
+	d.feedSample(t0.Add(time.Minute), 20, 2, nil, 0, nil) // new samples: the day is dirty again
+
+	writeTemp = func(*os.File, []byte) error { return errWrite }
+	cfgErr := writeTargetConfig(dir, "10.0.0.1:9200")
+	d.writeDay(t0.Add(2*time.Minute), true)
+	writeTemp = realWrite
+
+	if !errors.Is(cfgErr, errWrite) || readFile(t, cfg) != beforeCfg {
+		t.Fatalf("writeTargetConfig = %v, config.json = %q; want the write error and the previous config kept", cfgErr, readFile(t, cfg))
+	}
+	if !d.day.dirty || !d.day.lastWrite.Equal(t0) || readFile(t, day) != beforeDay {
+		t.Fatalf("failed day write: dirty = %v, lastWrite = %v, %s = %q; want the day still dirty, as of %v, and the file unchanged",
+			d.day.dirty, d.day.lastWrite, day, readFile(t, day), t0)
 	}
 }
 

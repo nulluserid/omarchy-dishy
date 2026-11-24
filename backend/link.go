@@ -33,6 +33,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"runtime"
 	"strconv"
@@ -165,6 +166,21 @@ func geoEvidence(g geoInfo, now time.Time) bool {
 	return g.Ts > 0 && now.Unix()-g.Ts <= int64(linkGraceWindow.Seconds())
 }
 
+// geoMaxAge bounds the last-good policy. A failed lookup keeps the stored
+// result — one flaky answer must not blank the egress line — but a result
+// older than this without a successful lookup is no longer published: it
+// describes a network the machine may have left, and on one with no IPv4
+// route (moved to IPv6-only) no later lookup can ever correct it. The
+// egress line then goes away, as on a cold start, instead of showing a
+// stale address (geoPublishable).
+const geoMaxAge = 15 * time.Minute
+
+// geoPublishable answers whether the stored geo result still goes into
+// status.json: present, and no older than geoMaxAge.
+func geoPublishable(g geoInfo, now time.Time) bool {
+	return g.Ts > 0 && now.Sub(time.Unix(g.Ts, 0)) <= geoMaxAge
+}
+
 // maybeFetchGeo starts an egress lookup when the stored one is due.
 //
 // Cadence rule. The transition clock (geoTransitionInterval) applies only
@@ -245,7 +261,8 @@ func (d *daemon) drainGeo() {
 func (d *daemon) applyGeo(g geoInfo) {
 	d.geoFetching = false
 	if g.Ts == 0 {
-		// Failed lookup: keep the last known result and anchor the failure
+		// Failed lookup: keep the last known result — last-good, published
+		// for at most geoMaxAge (geoPublishable) — and anchor the failure
 		// backoff (maybeFetchGeo).
 		d.lastGeoFailUnix = time.Now().Unix()
 		return
@@ -257,9 +274,9 @@ func (d *daemon) applyGeo(g geoInfo) {
 
 // fetchGeo performs one egress lookup against the configured endpoint
 // (config.geoEndpoint). A failed call returns a zero geoInfo — applyGeo
-// keeps the previous result. Timestamped at `at` (the request launch), so a
-// lookup in flight during a route change can never masquerade as a
-// post-change answer.
+// keeps the previous result, published for at most geoMaxAge. Timestamped
+// at `at` (the request launch), so a lookup in flight during a route
+// change can never masquerade as a post-change answer.
 func (d *daemon) fetchGeo(at time.Time) (geoInfo, error) {
 	return fetchGeoURL(at, d.cfg.geoEndpoint)
 }
@@ -291,13 +308,16 @@ var geoTransport = func() *http.Transport {
 
 // fetchGeoURL performs one egress GET against `endpoint` over geoTransport.
 //
-// IPv4 only — no flag and no IPv6 fallback. The lookup leaves over IPv4, so
-// the provider sees the IPv4 source address and answers with the IPv4
-// address and its exit POP. An IPv6 answer locates a different exit, one
-// that is far harder to track down. On a network with no IPv4 route the
-// lookup fails and the normal failure backoff applies: no egress line in
-// the panel, and link classification falls back to dish evidence and the
-// grace window.
+// IPv4 on both ends — no flag and no IPv6 fallback. The lookup leaves over
+// IPv4, so the provider sees an IPv4 source address and answers with the IPv4
+// address and its exit POP. The dial alone does not guarantee that: through an
+// IPv4-connected proxy the provider sees the proxy's egress and may answer
+// with an IPv6 address, which locates a different exit, one that is far harder
+// to track down. So the answer's address is validated here, and anything that
+// is not an IPv4 address fails the lookup. On a network with no IPv4 route the
+// lookup fails the same way, and the normal failure backoff applies: no
+// egress line in the panel once a previous result has aged past geoMaxAge,
+// and link classification falls back to dish evidence and the grace window.
 func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	client := &http.Client{
 		Timeout:   5 * time.Second,
@@ -337,6 +357,16 @@ func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return geoInfo{}, err
 	}
+	// The address is validated, never clipped: it is the one field a lookup
+	// exists for, and a made-up one would be published as fact. Only a
+	// string that parses as an IPv4 address stands — not IPv6, not an
+	// IPv4-mapped IPv6 form, not a missing or malformed one. Anything else
+	// is a failed lookup like an unreachable provider: it counts toward the
+	// failure backoff, and the last good result stands (applyGeo).
+	ip, err := netip.ParseAddr(raw.IP)
+	if err != nil || !ip.Is4() {
+		return geoInfo{}, fmt.Errorf("answer: %q is not an IPv4 address", clip(raw.IP, maxGeoIPRunes))
+	}
 	// Every string here is the provider's to size, and each lands in every
 	// status.json until the next lookup: bound them once, where they enter.
 	// The carrier verdict reads the clipped values, so it can never disagree
@@ -344,7 +374,7 @@ func fetchGeoURL(at time.Time, endpoint string) (geoInfo, error) {
 	asn, org := clip(raw.ASN, maxGeoASNRunes), clip(raw.ASNOrg, maxGeoTextRunes)
 	return geoInfo{
 		Ts:         at.Unix(),
-		IP:         clip(raw.IP, maxGeoIPRunes),
+		IP:         ip.String(),
 		City:       clip(raw.City, maxGeoTextRunes),
 		Region:     clip(raw.RegionName, maxGeoTextRunes),
 		Country:    clip(raw.CountryISO, maxGeoCountryRunes),
