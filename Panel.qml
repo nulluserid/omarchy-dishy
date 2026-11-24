@@ -450,7 +450,7 @@ Panel {
                 width: parent.width
                 text: root.hasData && s.drop15m
                   ? "drops " + Model.fmtPct(s.drop15m.ratio * 100, 2) + " · "
-                    + (s.drop15m.count15m || 0) + " ev · " + Model.humanDur(s.drop15m.totalOutageS)
+                    + (s.drop15m.count15m || 0) + " events · " + Model.humanDur(s.drop15m.totalOutageS) + " out"
                   : ""
                 textFormat: Text.PlainText
                 elide: Text.ElideRight
@@ -640,9 +640,9 @@ Panel {
                   Repeater {
                     model: root.hasData && s.obs ? [
                       { label: "Obstructed", value: Model.fmtPct(s.obs.fraction * 100, 2) },
-                      { label: "Time", value: Model.humanDur(s.obs.timeObstructedS) },
-                      { label: "Valid", value: Model.humanDur(s.obs.validS) },
-                      { label: "FoV", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
+                      { label: "Time obstructed", value: Model.humanDur(s.obs.timeObstructedS) },
+                      { label: "Valid for", value: Model.humanDur(s.obs.validS) },
+                      { label: "Field of view", value: "θ ≤ " + (root.map ? root.map.maxThetaDeg : 90) + "°" }
                     ] : []
 
                     KVRow {
@@ -683,7 +683,7 @@ Panel {
                 }
                 KVRow {
                   small: true
-                  label: "Net"
+                  label: "Carrier"
                   value: root.hasData && s.geo
                     ? (s.geo.org ? String(s.geo.org) : "—") + (s.geo.asn ? " (" + s.geo.asn + ")" : "")
                     : ""
@@ -717,43 +717,26 @@ Panel {
             width: parent.width
             spacing: Style.space(12)
 
-            Text {
+            UsageCell {
               width: (parent.width - 2 * parent.spacing) * 0.32
-              text: root.hasData && s.usage
-                ? "TODAY ↓ " + Model.fmtGB(s.usage.downGB) + " ↑ " + Model.fmtGB(s.usage.upGB)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+              label: "Today"
+              value: root.hasData && s.usage
+                ? "↓ " + Model.fmtGB(s.usage.downGB) + " ↑ " + Model.fmtGB(s.usage.upGB) : ""
             }
 
-            Text {
-              width: (parent.width - 2 * parent.spacing) * 0.40
-              text: root.hasData && s.usage
-                ? "ALL-TIME ↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+            UsageCell {
+              width: (parent.width - 2 * parent.spacing) * 0.32
+              label: "All-time"
+              value: root.hasData && s.usage
+                ? "↓ " + Model.fmtGB(s.usage.allTimeDownGB) + " ↑ " + Model.fmtGB(s.usage.allTimeUpGB) : ""
             }
 
-            Text {
-              width: (parent.width - 2 * parent.spacing) * 0.28
-              text: root.hasData && s.avail
-                ? "AVAIL " + Model.fmtPct(s.avail.todayPct, 1) + " / " + Model.fmtPct(s.avail.sessionPct, 1)
-                : ""
-              textFormat: Text.PlainText
-              elide: Text.ElideRight
-              color: root.fg
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+            // 36 %: the widest cell, so "99.5% today / 100.0% session" fits.
+            UsageCell {
+              width: (parent.width - 2 * parent.spacing) * 0.36
+              label: "Avail"
+              value: root.hasData && s.avail
+                ? Model.fmtPct(s.avail.todayPct, 1) + " today / " + Model.fmtPct(s.avail.sessionPct, 1) + " session" : ""
             }
           }
 
@@ -858,6 +841,38 @@ Panel {
         ? (root.ctlOutput !== "" ? root.ctlOutput : "Done")
         : (root.ctlErrText !== "" ? root.ctlErrText
                                   : "Failed (exit " + exitCode + ")")
+    }
+  }
+
+  // One usage figure: a dim label and a bold value on one line, as every
+  // other label/value pair in the panel; the value elides when the cell is
+  // too narrow for it.
+  component UsageCell: Row {
+    id: cell
+    property string label: ""
+    property string value: ""
+
+    spacing: Style.space(4)
+
+    Text {
+      id: cellLabel
+      textFormat: Text.PlainText
+      text: cell.label
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+    }
+
+    Text {
+      anchors.baseline: cellLabel.baseline
+      textFormat: Text.PlainText
+      text: cell.value
+      elide: Text.ElideRight
+      width: Math.max(0, Math.min(implicitWidth, cell.width - cellLabel.width - cell.spacing))
+      color: root.fg
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      font.bold: true
     }
   }
 
