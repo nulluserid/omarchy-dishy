@@ -255,8 +255,10 @@ Panel {
     // The dashboard's own height, capped: the card ends where its content
     // does instead of holding a fixed height with an empty band under it.
     // Until the daemon answers, it is sized to the two waiting lines.
+    // The cap is the card's, the shell's 32 px of padding and border
+    // included: 512 leaves the dashboard 480.
     contentHeight: panel.fittedContentHeight(
-      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(480))
+      root.hasData ? dashColumn.implicitHeight : waitingColumn.implicitHeight, Style.space(512))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -382,8 +384,10 @@ Panel {
                         verticalAlignment: Text.AlignVCenter
                         textFormat: Text.PlainText
                         text: modelData
-                        // The last resort, for a notice longer than the row.
-                        elide: Text.ElideRight
+                        // No elide: the chip is as wide as this label's
+                        // measured advance, so one too long for the row is
+                        // never shortened: it runs over the title, to the
+                        // card's edge and no further.
                         color: Model.WARN_HEX
                         font.family: root.fontFamily
                         font.pixelSize: Style.font.bodySmall
